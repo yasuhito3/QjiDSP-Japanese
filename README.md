@@ -54,10 +54,16 @@ cd Qji-Network-Audio-Player
 
 ```bash
 git clone https://github.com/yasuhito3/QjiDSP-Japanese.git
-cd QjiDSP-Japanese
+cd QjiDSP-Japanese/qjidsp_installer
 ```
 
+> 📦 インストーラー本体・DSP設定ファイル・IRファイル等は、すべて **`qjidsp_installer/` フォルダの中** にまとめてあります。
+> GitHubの「Download ZIP」で取得した場合は、展開後にできる `QjiDSP-Japanese-main/` のようなフォルダの中の、
+> さらに `qjidsp_installer/` フォルダまで進んでから、次のステップを実行してください。
+
 ### 2. インストーラーを実行
+
+`qjidsp_installer/` フォルダの中で、次のいずれかを実行します。
 
 ```bash
 bash install_qjidsp.sh
