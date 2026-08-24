@@ -4,7 +4,7 @@ Linux 向けのハイファイ音楽再生システムです。ローカルフ�
 
 > 個人のオーディオ環境（Mark Levinson アンプ、Amanero Combo384 USB DAC 等）で日常的に使うために開発・改良を重ねているプロジェクトです。
 
-> ⚠️ **前提条件**：本リポジトリ（QjiDSP拡張）は、**先にQji本体（[qji リポジトリ](https://github.com/<your-username>/qji) ※既存の本体リポジトリのURLに置き換えてください）をインストール済みであること**を前提としています。
+> ⚠️ **前提条件**：本リポジトリ（QjiDSP拡張）は、**先に[Qji本体](https://github.com/yasuhito3/Qji-Network-Audio-Player)をインストール済みであること**を前提としています。
 > Qji本体がまだの場合は、先にそちらのインストール手順に従ってセットアップしてから、本リポジトリのインストーラーを実行してください。
 
 ---
@@ -28,8 +28,6 @@ Linux 向けのハイファイ音楽再生システムです。ローカルフ�
 
 ---
 
-
-
 ## 動作環境
 
 - Linux（Ubuntu / Linux Mint 系で動作確認）
@@ -40,11 +38,7 @@ Linux 向けのハイファイ音楽再生システムです。ローカルフ�
 
 ---
 
-
-
 ## インストール
-
-
 
 ### 0. 前提：Qji本体のインストール（未導入の場合）
 
@@ -56,16 +50,12 @@ cd Qji-Network-Audio-Player
 # Qji本体側のインストール手順に従ってください
 ```
 
-
-
 ### 1. 本リポジトリ（QjiDSP拡張）を取得
 
 ```bash
 git clone https://github.com/yasuhito3/QjiDSP-Japanese.git
 cd QjiDSP-Japanese
 ```
-
-
 
 ### 2. インストーラーを実行
 
@@ -88,6 +78,10 @@ bash install_qjidsp.sh
 
 ### 3. 起動
 
+デスクトップにあるQjiアイコンをダブルクリックすると起動します。
+
+手動で起動する場合：
+
 ```bash
 cd ~/qji && python3 qji.py
 ```
@@ -96,11 +90,7 @@ cd ~/qji && python3 qji.py
 
 ---
 
-
-
 ## 任意設定
-
-
 
 ### YouTube Music（ライブラリ連携）
 
@@ -124,12 +114,10 @@ python3 -c "from ytmusicapi import YTMusic; YTMusic.setup(filepath='~/.config/qj
 
 ### Qji Peak Monitor（ステレオVUメーター）
 
-⚠️ **本インストーラー（**`install_qjidsp.sh`**）には含まれていません。** 別リポジトリとしてGitHubに用意予定のオプション機能です。
+⚠️ **本インストーラー（`install_qjidsp.sh`）には含まれていません。** 別リポジトリとしてGitHubに用意予定のオプション機能です。
 必要な場合は、そちらのリポジトリを別途ご利用ください。（リンクは公開後に追記します）
 
 ---
-
-
 
 ## コマンドラインオプション
 
@@ -142,8 +130,6 @@ python3 qji.py --no-voice                       # 音声認識を無効化して
 ```
 
 ---
-
-
 
 ## トラブルシューティング
 
@@ -162,8 +148,6 @@ speaker-test -D hw:CARD=Loopback,DEV=0 -c 2 -r 48000 -F S32_LE
 ```
 
 ---
-
-
 
 ## ディレクトリ構成（インストール後）
 
@@ -185,8 +169,6 @@ speaker-test -D hw:CARD=Loopback,DEV=0 -c 2 -r 48000 -F S32_LE
 ```
 
 ---
-
-
 
 ## 謝辞・使用ライブラリ
 

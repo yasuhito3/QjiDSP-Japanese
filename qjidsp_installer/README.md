@@ -4,7 +4,7 @@ Linux 向けのハイファイ音楽再生システムです。ローカルフ�
 
 > 個人のオーディオ環境（Mark Levinson アンプ、Amanero Combo384 USB DAC 等）で日常的に使うために開発・改良を重ねているプロジェクトです。
 
-> ⚠️ **前提条件**：本リポジトリ（QjiDSP拡張）は、**先にQji本体（[qji リポジトリ](https://github.com/<your-username>/qji) ※既存の本体リポジトリのURLに置き換えてください）をインストール済みであること**を前提としています。
+> ⚠️ **前提条件**：本リポジトリ（QjiDSP拡張）は、**先に[Qji本体](https://github.com/yasuhito3/Qji-Network-Audio-Player)をインストール済みであること**を前提としています。
 > Qji本体がまだの場合は、先にそちらのインストール手順に従ってセットアップしてから、本リポジトリのインストーラーを実行してください。
 
 ---
@@ -45,16 +45,16 @@ Linux 向けのハイファイ音楽再生システムです。ローカルフ�
 本リポジトリ単体では動作しません。まだの場合は、先にQji本体をインストールしてください。
 
 ```bash
-git clone https://github.com/<your-username>/qji.git
-cd qji
+git clone https://github.com/yasuhito3/Qji-Network-Audio-Player.git
+cd Qji-Network-Audio-Player
 # Qji本体側のインストール手順に従ってください
 ```
 
 ### 1. 本リポジトリ（QjiDSP拡張）を取得
 
 ```bash
-git clone https://github.com/<your-username>/<このリポジトリ名>.git
-cd <このリポジトリ名>
+git clone https://github.com/yasuhito3/QjiDSP-Japanese.git
+cd QjiDSP-Japanese
 ```
 
 ### 2. インストーラーを実行
@@ -77,6 +77,10 @@ bash install_qjidsp.sh
 既存の `~/qji/` にインストール済みの場合、上書きされるファイルは自動的にタイムスタンプ付きでバックアップされます。
 
 ### 3. 起動
+
+デスクトップにあるQjiアイコンをダブルクリックすると起動します。
+
+手動で起動する場合：
 
 ```bash
 cd ~/qji && python3 qji.py
