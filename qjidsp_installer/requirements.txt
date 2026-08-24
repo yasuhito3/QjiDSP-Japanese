@@ -1,0 +1,18 @@
+# Qji 本体の動作に必要なPythonライブラリ
+# install_qjidsp.sh が自動的にインストールしますが、
+# 手動セットアップ時は以下を利用してください:
+#   pip install -r requirements.txt --break-system-packages
+
+mutagen          # 音楽ファイルのメタデータ読み取り
+soundfile        # 音声ファイル入出力
+scipy            # 信号処理
+yt-dlp           # YouTube Music 再生（必須）
+ytmusicapi       # YouTube Music ライブラリ連携（任意・推奨）
+requests         # Qobuz / SoundCloud / YouTube Music のHTTP通信
+
+# CamillaDSPのPythonバインディング（PyPI未公開のためgit経由）
+# pip install git+https://github.com/HEnquist/pycamilladsp.git --break-system-packages
+
+# 以下は任意機能（音声操作）に必要。使わない場合は省略可:
+# vosk
+# sounddevice

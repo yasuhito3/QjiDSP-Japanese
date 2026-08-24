@@ -28,8 +28,6 @@ Linux 向けのハイファイ音楽再生システムです。ローカルフ�
 
 ---
 
-
-
 ## 動作環境
 
 - Linux（Ubuntu / Linux Mint 系で動作確認）
@@ -40,32 +38,24 @@ Linux 向けのハイファイ音楽再生システムです。ローカルフ�
 
 ---
 
-
-
 ## インストール
-
-
 
 ### 0. 前提：Qji本体のインストール（未導入の場合）
 
 本リポジトリ単体では動作しません。まだの場合は、先にQji本体をインストールしてください。
 
 ```bash
-git clone https://github.com/yasuhito3/Qji-Network-Audio-Player.git
-cd Qji-Network-Audio-Player
+git clone https://github.com/<your-username>/qji.git
+cd qji
 # Qji本体側のインストール手順に従ってください
 ```
-
-
 
 ### 1. 本リポジトリ（QjiDSP拡張）を取得
 
 ```bash
-git clone https://github.com/yasuhito3/QjiDSP-Japanese.git
-cd QjiDSP-Japanese
+git clone https://github.com/<your-username>/<このリポジトリ名>.git
+cd <このリポジトリ名>
 ```
-
-
 
 ### 2. インストーラーを実行
 
@@ -96,11 +86,7 @@ cd ~/qji && python3 qji.py
 
 ---
 
-
-
 ## 任意設定
-
-
 
 ### YouTube Music（ライブラリ連携）
 
@@ -124,12 +110,10 @@ python3 -c "from ytmusicapi import YTMusic; YTMusic.setup(filepath='~/.config/qj
 
 ### Qji Peak Monitor（ステレオVUメーター）
 
-⚠️ **本インストーラー（**`install_qjidsp.sh`**）には含まれていません。** 別リポジトリとしてGitHubに用意予定のオプション機能です。
+⚠️ **本インストーラー（`install_qjidsp.sh`）には含まれていません。** 別リポジトリとしてGitHubに用意予定のオプション機能です。
 必要な場合は、そちらのリポジトリを別途ご利用ください。（リンクは公開後に追記します）
 
 ---
-
-
 
 ## コマンドラインオプション
 
@@ -142,8 +126,6 @@ python3 qji.py --no-voice                       # 音声認識を無効化して
 ```
 
 ---
-
-
 
 ## トラブルシューティング
 
@@ -162,8 +144,6 @@ speaker-test -D hw:CARD=Loopback,DEV=0 -c 2 -r 48000 -F S32_LE
 ```
 
 ---
-
-
 
 ## ディレクトリ構成（インストール後）
 
@@ -185,8 +165,6 @@ speaker-test -D hw:CARD=Loopback,DEV=0 -c 2 -r 48000 -F S32_LE
 ```
 
 ---
-
-
 
 ## 謝辞・使用ライブラリ
 

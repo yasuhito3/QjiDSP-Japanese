@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Qjiの実行時生成物・個人設定（配布物には含めない）
+*.log
+*.bak_before_dsp_*
+qji.py.bak_*
+/camilladsp_test/spatial_final.yml
+music_mood_db.json
+*.db
+
+# ユーザー個別の設定・認証情報
+.config/qji_*.json
+qji_*_favorites.json
+qji_*_playlists.json
+qji_*_auth.json
+
+# インストール時ログ
+qjidsp_install_debug.log
+
+# OS/エディタ生成物
+.DS_Store
+*.swp
+.vscode/
+.idea/
