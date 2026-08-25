@@ -161,9 +161,11 @@ speaker-test -D hw:CARD=Loopback,DEV=0 -c 2 -r 48000 -F S32_LE
 ~/qji/
 ├── qji.py                      # 本体
 ├── qji_qobuzdsp.py             # Qobuz モジュール
+├── qji_qobuz_browser.py        # Qobuz ブラウザUI
 ├── qji_soundcloud.py           # SoundCloud モジュール
 ├── qji_soundcloud_browser.py   # SoundCloud ブラウザUI
 ├── qji_ytmusic.py              # YouTube Music モジュール
+├── qji_ytmusic_browser.py      # YouTube Music ブラウザUI
 ├── camilladsp_test/
 │   ├── spatial_final.yml       # 現在有効なDSP設定（起動時に生成）
 │   ├── wobble_v1〜v5.py        # 揺らぎLFOスクリプト

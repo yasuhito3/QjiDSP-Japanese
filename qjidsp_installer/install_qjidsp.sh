@@ -254,9 +254,11 @@ backup_and_install() {
 
 backup_and_install "qji.py"
 backup_and_install "qji_qobuzdsp.py"
+backup_and_install "qji_qobuz_browser.py"
 backup_and_install "qji_soundcloud.py"
 backup_and_install "qji_soundcloud_browser.py"
 backup_and_install "qji_ytmusic.py"
+backup_and_install "qji_ytmusic_browser.py"
 
 # 古いバイトコードキャッシュが残っていると変更が反映されないことがあるため削除
 if [ -d "$QJI_DIR/__pycache__" ]; then
@@ -349,7 +351,7 @@ fi
 # -------------------------------------------------------------
 step "動作確認"
 
-for pyfile in qji.py qji_qobuzdsp.py qji_soundcloud.py qji_soundcloud_browser.py qji_ytmusic.py; do
+for pyfile in qji.py qji_qobuzdsp.py qji_qobuz_browser.py qji_soundcloud.py qji_soundcloud_browser.py qji_ytmusic.py qji_ytmusic_browser.py; do
     if [ -f "$QJI_DIR/$pyfile" ]; then
         python3 -c "import ast; ast.parse(open('$QJI_DIR/$pyfile').read())" \
             && ok "$pyfile 構文チェックOK" \
