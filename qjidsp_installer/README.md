@@ -120,8 +120,12 @@ python3 -c "from ytmusicapi import YTMusic; YTMusic.setup(filepath='~/.config/qj
 
 ### Qji Peak Monitor（ステレオVUメーター）
 
-⚠️ **本インストーラー（`install_qjidsp.sh`）には含まれていません。** 別リポジトリとしてGitHubに用意予定のオプション機能です。
-必要な場合は、そちらのリポジトリを別途ご利用ください。（リンクは公開後に追記します）
+⚠️ **本インストーラー（`install_qjidsp.sh`）には含まれていません。** 独立したオプションのリポジトリとして公開しています：
+👉 **[Qji Peak Monitor](https://github.com/yasuhito3/Qji-peak-monitor)**
+
+Qjiの最終出力段をリアルタイムに可視化する、スタンドアロンのステレオピーク（VU）メーターです。
+QjiDSP経由で聴く際に生じる下流バッファ分のズレを補正する「ディスプレイディレイ」機能も備えています。
+インストール方法・使い方は、そちらのリポジトリのREADMEを参照してください。
 
 ---
 
