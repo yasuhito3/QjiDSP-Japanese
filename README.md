@@ -1,5 +1,5 @@
 **🟢 初めてQjiDSPをお使いになる方へ**  
-まずはこちらをご覧ください → `QjiDSP Quick Start Guide`
+[まずはこちらをご覧ください →](https://github.com/yasuhito3/QjiDSP-Japanese/blob/main/QjiDSP_Quick_Start_Japanese.md) `QjiDSP Quick Start Guide`
 
 # Qji（奏在）
 
