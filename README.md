@@ -111,6 +111,26 @@ cd ~/qji && python3 qji.py
 
 
 
+## アップデート
+
+一度インストールすれば、以後は毎回ZIPを再ダウンロードしたり`git clone`し直したり
+する必要はありません。インストール時に、`~/qji/`へ`update_qjidsp.sh`（と
+アップデート確認用のデスクトップアイコン）が一緒に配置されます。
+
+- **ターミナルから**: `cd ~/qji && bash update_qjidsp.sh`
+- **デスクトップアイコンから**: `~/qji/QjiDSPアップデート確認.desktop` をダブルクリック
+
+このリポジトリの`VERSION`ファイルを確認し、新しいバージョンがあれば確認のうえ
+自動的にダウンロードし、最新のファイルで`install_qjidsp.sh`を実行し直します
+（上書きされる既存ファイルはインストーラーの仕様により自動的にタイムスタンプ付き
+でバックアップされます）。すでに最新版の場合は、その旨を表示して終了します。
+
+Qji Peak Monitorのアップデート確認と同じ方式です。
+
+---
+
+
+
 ## 任意設定
 
 
@@ -187,6 +207,9 @@ speaker-test -D hw:CARD=Loopback,DEV=0 -c 2 -r 48000 -F S32_LE
 ```
 ~/qji/
 ├── qji.py                      # 本体
+├── VERSION                     # インストール済みバージョン(update_qjidsp.shが参照)
+├── update_qjidsp.sh            # アップデート確認スクリプト
+├── QjiDSPアップデート確認.desktop  # 上記のデスクトップアイコン版
 ├── qji_qobuzdsp.py             # Qobuz モジュール
 ├── qji_qobuz_browser.py        # Qobuz ブラウザUI
 ├── qji_soundcloud.py           # SoundCloud モジュール

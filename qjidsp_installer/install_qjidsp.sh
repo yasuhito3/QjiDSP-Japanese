@@ -332,6 +332,29 @@ PYEOF
 
 ok "ファイル配置・パス調整完了"
 
+# --- バージョン情報／アップデートスクリプトの配置 ---
+# update_qjidsp.sh が「今インストールされているバージョン」を確認するため
+# に使う。~/qji/ に一緒に置いておくことで、qjidsp_installer/ フォルダを
+# 残していなくても "cd ~/qji && bash update_qjidsp.sh" でアップデート確認
+# できるようにする。
+if [ -f "$SCRIPT_DIR/VERSION" ]; then
+    cp "$SCRIPT_DIR/VERSION" "$QJI_DIR/VERSION"
+else
+    echo "unknown" > "$QJI_DIR/VERSION"
+fi
+if [ -f "$SCRIPT_DIR/update_qjidsp.sh" ]; then
+    cp "$SCRIPT_DIR/update_qjidsp.sh" "$QJI_DIR/update_qjidsp.sh"
+    chmod +x "$QJI_DIR/update_qjidsp.sh"
+fi
+if [ -f "$SCRIPT_DIR/QjiDSPアップデート確認.desktop" ]; then
+    cp "$SCRIPT_DIR/QjiDSPアップデート確認.desktop" "$QJI_DIR/QjiDSPアップデート確認.desktop"
+    chmod +x "$QJI_DIR/QjiDSPアップデート確認.desktop"
+    if command -v gio >/dev/null 2>&1; then
+        gio set "$QJI_DIR/QjiDSPアップデート確認.desktop" "metadata::trusted" true >/dev/null 2>&1 || true
+    fi
+fi
+ok "VERSIONファイル／アップデートスクリプト／アップデート確認アイコンを配置しました"
+
 # -------------------------------------------------------------
 # ステップ7: デスクトップアイコンの更新確認
 # -------------------------------------------------------------
@@ -396,5 +419,9 @@ echo "  DSPモード選択後に自動検出・選択できます。"
 echo ""
 echo "  denoのPATHは ~/.bashrc に追加済みです。"
 echo "  新しいターミナルを開くか、'source ~/.bashrc' を実行すると反映されます。"
+echo ""
+echo "  アップデートの確認:"
+echo "    cd ${QJI_DIR} && bash update_qjidsp.sh"
+echo "    (または ${QJI_DIR}/QjiDSPアップデート確認.desktop をダブルクリック)"
 echo -e "${GREEN}${BOLD}============================================================${RESET}"
 read -rp "Enterキーで閉じます..." _
