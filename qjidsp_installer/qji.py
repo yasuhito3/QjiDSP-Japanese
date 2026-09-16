@@ -2626,11 +2626,47 @@ def get_metadata(filepath):
         return {'title': os.path.basename(filepath), 'artist': 'Unknown'}
 
 
+def _load_db_path_index():
+    """
+    music_mood_db.json を1回だけ読み込み、path(正規化済み)→レコード
+    の辞書を返す。フォルダースキャン系のトラック情報にDB由来の
+    genre/album/audio_profile/filter_preset/si_preset を後付けで
+    マージするために使う。
+    ファイルが無い・壊れている等の場合は空辞書を返す（呼び出し側は
+    従来通りDBなしとして動作するのでフォルダー再生自体は失敗しない）。
+    """
+    index = {}
+    try:
+        if not os.path.exists(DATABASE_FILE):
+            return index
+        with open(DATABASE_FILE, "r", encoding="utf-8") as f:
+            db = json.load(f)
+        if not isinstance(db, list):
+            return index
+        for rec in db:
+            if isinstance(rec, dict) and rec.get("path"):
+                index[os.path.normpath(rec["path"])] = rec
+    except Exception:
+        pass
+    return index
+
+
 def get_folder_tracks(folder_path):
-    """フォルダ内の音楽ファイル一覧を取得"""
+    """
+    フォルダ内の音楽ファイル一覧を取得。
+    ★★★ 修正: これまでID3タグ(title/artist)しか持たない「まっさら」な
+    トラック辞書を作っていたため、[s]キーでmusic_mood_db.jsonへ保存した
+    audio_profile/filter_preset（音場選択）がアルバム(フォルダー)再生の
+    入口で一切参照されず、次に同じアルバムを開くたびに保存前の状態
+    （ジャンル自動判定 or デフォルト）へ戻ってしまう不具合があった。
+    ここでDB側のレコードをpathで引き、存在すればgenre/album/
+    audio_profile/filter_preset/si_presetをマージすることで、
+    保存済みの音場選択がフォルダー再生でも正しく復元されるようにする。★★★
+    """
     try:
         if not os.path.exists(folder_path) or not os.path.isdir(folder_path):
             return []
+        db_index = _load_db_path_index()
         tracks = []
         for item in sorted(os.listdir(folder_path)):
             item_path = os.path.join(folder_path, item)
@@ -2642,6 +2678,13 @@ def get_folder_tracks(folder_path):
                     'artist': metadata['artist'],
                     'filename': item
                 }
+                # ★★★ DBレコードがあれば音場関連フィールドをマージ ★★★
+                db_rec = db_index.get(os.path.normpath(item_path))
+                if db_rec:
+                    for key in ('genre', 'album', 'audio_profile',
+                                'filter_preset', 'si_preset'):
+                        if key in db_rec and db_rec[key] not in (None, ''):
+                            track_info[key] = db_rec[key]
                 tracks.append(track_info)
         return tracks
     except Exception as e:
@@ -10494,9 +10537,27 @@ def _do_save_profile():
     [s]キー: 現在の全音響設定を音源プロファイルとして保存。
     曲単位 / アルバム単位をジャンル・タイトルから推奨し、ユーザーが選択する。
     """
+    global current_gain_preset, _gain_preset_auto_linked_jazz
+
     _si_display_event.clear()
     try:
         time.sleep(0.60)
+
+        # ★★★ 修正: 保存前に「jazz自動昇格ゲインの取り残し」を解消する ★★★
+        # current_gain_preset は曲間で自動リセットされない「引き継ぎ」変数で、
+        # jazzプリセットのときだけ自動でjazz_pop(ポップス)へ昇格し、jazz以外に
+        # 戻ったときだけ自動で元に戻る（この巻き戻しは通常の曲送り時のみ実行され、
+        # 保存済みプロファイルがある曲では実行されない）。
+        # そのため「ジャズの曲の直後にクラシックの曲を[s]保存する」ようなタイミングだと、
+        # 巻き戻る前の古いjazz_popがそのままアルバム全体に保存されてしまい、
+        # 以後そのアルバムが常に「ポップス」ゲインで再生される不具合があった。
+        # 保存の直前でこの不整合だけを解消しておく（[g]キーで手動選択した場合は
+        # _gain_preset_auto_linked_jazz が False になっているので上書きしない）。
+        if (_gain_preset_auto_linked_jazz
+                and current_filter_preset != 'jazz'
+                and current_gain_preset == 'jazz_pop'):
+            current_gain_preset = 'classical'
+            _gain_preset_auto_linked_jazz = False
 
         with info_display_lock:
             _ti = current_track_info.copy()
@@ -10522,8 +10583,14 @@ def _do_save_profile():
             print(f"│  AL  : {(album or '---')[:44]:<44} │")
             print(f"│  Genre: {(genre or '---')[:43]:<43} │")
             print("├──────────────────────────────────────────────────────┤")
+            _gp_label_for_confirm = {
+                'classical': 'クラシック (0 dB)',
+                'general':   '汎用 (-1.5 dB)',
+                'jazz_pop':  'ポップス (-3.5 dB)',
+                'loud':      'ラウド (-5 dB)',
+            }.get(profile['gain_preset'], profile['gain_preset'])
             print(f"│  フィルター    : {_fp_label:<38} │")
-            print(f"│  入力ゲイン    : {profile['gain_preset']:<38} │")
+            print(f"│  入力ゲイン    : {_gp_label_for_confirm:<38} │")
             print(f"│  出力ゲイン    : {CURRENT_VOLUME:+d} dB{'':<35} │")
             print(f"│  楽友協会効果  : {'ON' if profile['musikverein_room_effects'] else 'OFF':<38} │")
             print(f"│  Air Layer     : {'ON' if profile['air_particle_layer'] else 'OFF':<38} │")
@@ -11104,7 +11171,7 @@ def play_tracks_gapless(tracks, start_index=0):
             output_sample_rate = upsampling_target_rate
             pass  # サンプリングレート情報（情報バーに表示済み）
         else:
-            output_sample_rate = 48000 if dsp_mode_active else original_sample_rate
+            output_sample_rate = original_sample_rate
             pass  # サンプリングレート情報
         
         # FFmpegコマンドを構築
