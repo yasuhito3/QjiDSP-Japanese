@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=QjiDSP インストーラー
+Name[ja]=QjiDSP インストーラー
+GenericName=QjiDSP Installer
+Comment=Qji 奏在に3D空間音響(CamillaDSP)を追加インストールします
+Exec=bash install_qjidsp.sh
+Icon=audio-x-generic
+Terminal=true
+StartupNotify=false
+Categories=System;Utility;
+Keywords=Qji;QjiDSP;CamillaDSP;install;music;

@@ -68,6 +68,30 @@ except Exception as _si_e:
     print(f"⚠️  Sonia Intelligence System: 無効 ({_si_e})")
 # ===== ★★★ Sonia Intelligence System ここまで ★★★ =====
 
+# ===== ★★★ USB出力デジタルノイズ対策システム ★★★ =====
+try:
+    from usb_noise_guard import (
+        optimize_usb_audio_output, card_num_from_alsa_device, toggle_usb_audio_output,
+        toggle_autosuspend_guard, toggle_rtprio_guard, format_guard_status,
+    )
+    USB_NOISE_GUARD_AVAILABLE = True
+except Exception as _ung_e:
+    USB_NOISE_GUARD_AVAILABLE = False
+    def optimize_usb_audio_output(*_a, **_kw):  # フォールバック（未導入でも再生を止めない）
+        return None
+    def card_num_from_alsa_device(_s):
+        return None
+    def toggle_usb_audio_output(*_a, **_kw):
+        return None
+    def toggle_autosuspend_guard(*_a, **_kw):
+        return None
+    def toggle_rtprio_guard(*_a, **_kw):
+        return None
+    def format_guard_status(*_a, **_kw):
+        return "🔌 USBノイズ対策: 利用不可"
+    print(f"⚠️  USB出力ノイズ対策システム: 無効 ({_ung_e})")
+# ===== ★★★ USB出力デジタルノイズ対策システム ここまで ★★★ =====
+
 # Webサーバー用インポート
 try:
     from http.server import HTTPServer, SimpleHTTPRequestHandler
@@ -219,6 +243,15 @@ stop_playback = False
 current_processes = {'ffmpeg': None, 'aplay': None, 'feh': None}
 output_device = 'hw:2,0'
 dsp_mode_active = False  # DSPモード時はTrue（48000Hz固定）
+current_dsp_venue = None  # ★ 再生中の[1]〜[6]キー切替用: 現在有効なDSPモード(v1〜v6)。起動時選択/switch_dsp_venue()で更新
+DSP_VENUE_LABELS = {
+    '1': '🏛️ 濃厚ホール(静)',
+    '2': '🏛️ 濃厚ホール(動)',
+    '3': '🎙️ 素材の味(静)',
+    '4': '🎙️ 素材の味(動)',
+    '5': '🎻 倍音モード',
+    '6': '🎧 倍音モード(HP)',
+}  # ★ ジャケット画面バッジ表示用ラベル（起動時のDSPモード選択メニューの説明文と対応）
 current_playing_track = None
 current_image_path = None
 next_track_requested = False
@@ -3187,6 +3220,40 @@ def create_cover_with_info(image_path, track_info):
         except Exception:
             pass  # プリセットバッジ生成失敗は無視して通常画像を使用
         
+        # ★★★ 音場バッジ(左上・2段目): 現在有効なDSPモード(v1〜v6)を表示 ★★★
+        try:
+            if current_dsp_venue:
+                _venue_badge_label = DSP_VENUE_LABELS.get(current_dsp_venue, f"v{current_dsp_venue}")
+                _venue_badge_text = f"🎧 {_venue_badge_label}"
+
+                venue_badge_path = os.path.join(temp_dir, "venue_badge.png")
+                venue_badge_cmd = [
+                    'convert',
+                    '-size', '320x48',
+                    'xc:none',
+                    '-fill', 'rgba(10,10,10,0.82)',
+                    '-draw', 'roundrectangle 0,0 319,47 12,12',
+                    '-font', jp_font,
+                    '-pointsize', '17',
+                    '-fill', '#ffffff',
+                    '-gravity', 'Center',
+                    '-annotate', '+0+0', _venue_badge_text,
+                    venue_badge_path
+                ]
+                subprocess.run(venue_badge_cmd, capture_output=True, check=True, timeout=5)
+                if os.path.exists(venue_badge_path):
+                    venue_composite_cmd = [
+                        'convert', output_path,
+                        venue_badge_path,
+                        '-gravity', 'NorthWest',
+                        '-geometry', '+12+68',  # ★ プリセットバッジ(高さ48+上余白12)の直下に配置
+                        '-composite',
+                        output_path
+                    ]
+                    subprocess.run(venue_composite_cmd, capture_output=True, check=True, timeout=5)
+        except Exception:
+            pass  # 音場バッジ生成失敗は無視して通常画像を使用
+        
         return output_path if os.path.exists(output_path) else image_path
     
     except Exception as e:
@@ -3292,6 +3359,141 @@ def shutdown_dsp():
     setattr(_bi_cleanup, '_cdsp_proc', None)
     setattr(_bi_cleanup, '_wobble_proc', None)
     setattr(_bi_cleanup, '_watchdog_proc', None)
+
+
+def switch_dsp_venue(dsp_choice):
+    """
+    ★ 再生中に[1]〜[6]キーでDSPモード(v1〜v6)を切り替える。
+
+    起動時のDSPモード選択と同じ _yml_map / _wobble_map を使い、CamillaDSPと
+    wobbleを再起動して差し替える。DAC出力先（device/format）は切り替え前の
+    値をそのまま新しいYAMLに引き継ぐので、選び直しは発生しない
+    （「音場だけ変わって出力先は変わらない」を実現する）。
+    ffmpeg→aplay の音声パイプラインには一切触れないため、再生中の曲は
+    途切れず、頭出しも発生しない。
+
+    戻り値: 成功したらTrue、失敗したらFalse
+    """
+    global current_dsp_venue
+    try:
+        return _switch_dsp_venue_impl(dsp_choice)
+    except Exception as _e:
+        # ★★★ 最終防衛ライン ★★★
+        # ここで例外を握りつぶさないと、keyboard_listener()のwhileループを
+        # 突き破ってスレッドごと終了してしまい、「キー操作が効かなくなる」原因になる。
+        terminal_print(f"❌ DSP切り替え中に予期しないエラー: {_e}")
+        terminal_print("💡 再生は継続します。DSPの状態が不安定な場合はQjiを再起動してください。")
+        return False
+
+
+def _switch_dsp_venue_impl(dsp_choice):
+    """switch_dsp_venue()の実処理本体。例外送出の可能性があるため、
+    呼び出し元のswitch_dsp_venue()側で必ずtry/exceptして守ること。"""
+    global current_dsp_venue
+    _HOME = os.path.expanduser("~")
+    _live_yml = f'{_HOME}/camilladsp_test/spatial_final.yml'
+
+    # ★ 起動時のDSPモード選択メニューと同じマッピング（v1〜v6のみ）
+    _yml_map = {
+        '1': f'{_HOME}/qjidsp_backup_v1/spatial_final.yml',
+        '2': f'{_HOME}/qjidsp_backup_v2/spatial_final.yml',
+        '3': f'{_HOME}/qjidsp_backup_v3/spatial_final.yml',
+        '4': f'{_HOME}/qjidsp_backup_v4/spatial_final.yml',
+        '5': f'{_HOME}/qjidsp_backup_v5/spatial_final.yml',
+        '6': f'{_HOME}/qjidsp_backup_v6/spatial_final.yml',
+    }
+    _wobble_map = {
+        '1': f'{_HOME}/camilladsp_test/wobble_v1.py',
+        '2': f'{_HOME}/camilladsp_test/wobble_v2.py',
+        '3': f'{_HOME}/camilladsp_test/wobble_v3_static.py',
+        '4': f'{_HOME}/camilladsp_test/wobble_v4.py',
+        '5': f'{_HOME}/camilladsp_test/wobble_v5.py',
+        '6': f'{_HOME}/camilladsp_test/wobble_v5_harmonics_hp.py',
+    }
+
+    if dsp_choice not in _yml_map:
+        terminal_print(f"⚠️ 未知のDSPモード指定です: {dsp_choice}")
+        return False
+
+    # ★ 現在有効なDAC出力(device/format行)を、切り替え前に退避しておく
+    _current_device_line = None
+    _current_format_line = None
+    try:
+        with open(_live_yml, 'r') as _yf:
+            _lines = _yf.readlines()
+        _in_playback = False
+        for _line in _lines:
+            _stripped = _line.strip()
+            if _stripped == 'playback:':
+                _in_playback = True
+            elif _stripped.startswith('capture:') or _stripped.startswith('mixers:') or _stripped.startswith('filters:') or _stripped.startswith('pipeline:'):
+                _in_playback = False
+            if _in_playback and _stripped.startswith('device:') and _current_device_line is None:
+                _current_device_line = _line
+            if _in_playback and _stripped.startswith('format:') and _current_format_line is None:
+                _current_format_line = _line
+    except Exception as _e:
+        terminal_print(f"⚠️ 現在のDAC設定の読み取りに失敗: {_e}")
+
+    terminal_print(f"\n🎛️ DSP v{dsp_choice} へ切り替えます...")
+    shutdown_dsp()
+
+    try:
+        with open(_yml_map[dsp_choice], 'r', encoding='utf-8') as _f_src:
+            _yml_content = _f_src.read()
+        _yml_content = _yml_content.replace('{HOME}', _HOME)
+
+        # ★ 退避しておいた現在のDAC device/format設定を、新しいモードのYAMLに引き継ぐ
+        if _current_device_line or _current_format_line:
+            _new_lines2 = []
+            _in_playback2 = False
+            for _line in _yml_content.splitlines(keepends=True):
+                _stripped2 = _line.strip()
+                if _stripped2 == 'playback:':
+                    _in_playback2 = True
+                elif _stripped2.startswith('capture:') or _stripped2.startswith('mixers:') or _stripped2.startswith('filters:') or _stripped2.startswith('pipeline:'):
+                    _in_playback2 = False
+                if _in_playback2 and _stripped2.startswith('device:') and _current_device_line:
+                    _new_lines2.append(_current_device_line)
+                    continue
+                if _in_playback2 and _stripped2.startswith('format:') and _current_format_line:
+                    _new_lines2.append(_current_format_line)
+                    continue
+                _new_lines2.append(_line)
+            _yml_content = ''.join(_new_lines2)
+
+        with open(_live_yml, 'w', encoding='utf-8') as _f_dst:
+            _f_dst.write(_yml_content)
+    except Exception as _e:
+        terminal_print(f"❌ YAML書き換えに失敗しました: {_e}")
+        return False
+
+    import builtins as _bi4
+    _cdsp_log = open('/tmp/camilladsp.log', 'w')
+    _bi4._cdsp_proc = subprocess.Popen(
+        ['camilladsp', _live_yml, '--port', '1234'],
+        stdout=_cdsp_log, stderr=_cdsp_log
+    )
+    time.sleep(3.0)
+
+    _wobble_log = open('/tmp/wobble.log', 'w')
+    _wobble_path = _wobble_map[dsp_choice]
+    _bi4._wobble_proc = subprocess.Popen(
+        ['python3', _wobble_path],
+        stdout=_wobble_log, stderr=_wobble_log
+    )
+    _bi4._wobble_script_path = _wobble_path
+    time.sleep(1.0)
+
+    _watchdog_log = open('/tmp/cdsp_watchdog.log', 'w')
+    _bi4._watchdog_proc = subprocess.Popen(
+        ['python3', f'{_HOME}/camilladsp_test/cdsp_watchdog.py'],
+        stdout=_watchdog_log, stderr=_watchdog_log
+    )
+
+    current_dsp_venue = dsp_choice
+    terminal_print(f"✅ DSP v{dsp_choice} へ切り替えました")
+    return True
 
 
 def _scan_dac_list():
@@ -3482,6 +3684,14 @@ def reinitialize_dsp_output():
     else:
         _bi3._wobble_proc = None
         print("⚠️ wobbleスクリプトの場所が分からないため、wobbleは起動していません（音場自体は出力されます）")
+
+    # ★★★ USB出力デジタルノイズ対策（オートサスペンド無効化+RT優先度付与） ★★★
+    _usb_cnum = card_num_from_alsa_device(_dac_device)
+    if _usb_cnum is not None:
+        _extra_pids = [_bi3._cdsp_proc.pid]
+        if _bi3._wobble_proc is not None:
+            _extra_pids.append(_bi3._wobble_proc.pid)
+        optimize_usb_audio_output(_usb_cnum, extra_pids=_extra_pids)
 
     print(f"✅ DSPを再起動しました。新しい出力先: {_dac_device}")
 
@@ -9942,7 +10152,7 @@ def play_one_track(track, show_controls=True):
         terminal_print(f"   ムード: {color}{emoji} {mood_jp}{reset}")
     
     if show_controls:
-        terminal_print("🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [q]終了してメニューへ")
+        terminal_print("🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態) | [q]終了してメニューへ")
         _gp_labels = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
         terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_labels.get(current_gain_preset, current_gain_preset)}) | [c]フィルター | [s]保存", end="")
         if SI_AVAILABLE:
@@ -10532,6 +10742,60 @@ def _sync_profile_to_memory(profile: dict, file_path: str = None,
         pass
 
 
+def _redisplay_current_cover() -> bool:
+    """
+    現在再生中の曲のジャケットを（曲情報オーバーレイ付きで）再表示する。
+
+    [s]キーでプロファイルを保存した直後に呼ぶ。保存のためにジャケット画面を
+    抜けてターミナルのメニューを出しているので、保存が終わったらそのまま
+    ジャケット表示へ戻す。音声（ffmpeg→aplay）には一切触れないので、
+    再生は途切れず、曲の頭出しも発生しない。
+
+    表示できたら True、ジャケットが見つからない等で表示できなければ False。
+    """
+    try:
+        track_path = None
+        if current_playing_track and current_playing_track.get('path'):
+            track_path = current_playing_track.get('path')
+        if not track_path:
+            with info_display_lock:
+                track_path = current_track_info.copy().get('file_path')
+        if not track_path:
+            return False
+
+        image_path = find_cover_image_safe(track_path)
+        if not image_path:
+            return False
+
+        with info_display_lock:
+            _ti_copy = current_track_info.copy()
+
+        _feh = current_processes.get('feh')
+        if _feh and _feh.poll() is None:
+            try:
+                _feh.terminate()
+                _feh.wait(timeout=1)
+            except Exception:
+                try:
+                    _feh.kill()
+                except Exception:
+                    pass
+
+        current_processes['feh'] = show_cover_image_with_info(image_path, _ti_copy)
+        # ★ current_image_path は show_cover_image_with_info() の内部で、
+        #   曲情報を合成した画像（display_image）のパスに設定される。
+        #   ここで元画像のパス（image_path）に上書きしてしまうと、後で [i] キー
+        #   （画像再表示）を押したときに show_cover_image() が「情報無しの
+        #   ジャケットそのまま」を表示してしまうため、上書きしない。
+        return bool(current_processes['feh'])
+    except Exception as e:
+        try:
+            terminal_print(f"⚠️ ジャケットの再表示に失敗しました: {e}")
+        except Exception:
+            pass
+        return False
+
+
 def _do_save_profile():
     """
     [s]キー: 現在の全音響設定を音源プロファイルとして保存。
@@ -10614,6 +10878,8 @@ def _do_save_profile():
 
         choice = _si_readline("  選択 (1/2): ").strip()
 
+        _saved_ok = False  # 保存に成功したらジャケット表示へ自動復帰する
+
         if choice == '1':
             if not file_path:
                 with terminal_io_lock:
@@ -10622,6 +10888,7 @@ def _do_save_profile():
                 ok = _save_audio_profile_to_track(file_path, profile)
                 if ok:
                     _sync_profile_to_memory(profile, file_path=file_path)
+                    _saved_ok = True
                 with terminal_io_lock:
                     if ok:
                         print(f"\n  ✅ 「{title[:40]}」にプロファイルを保存しました")
@@ -10633,6 +10900,7 @@ def _do_save_profile():
             updated = _save_audio_profile_to_db(album, folder, profile)
             if updated > 0:
                 _sync_profile_to_memory(profile, album=album, folder=folder)
+                _saved_ok = True
             with terminal_io_lock:
                 if updated > 0:
                     tgt = album or os.path.basename(folder) or '不明'
@@ -10645,7 +10913,20 @@ def _do_save_profile():
             with terminal_io_lock:
                 print("  キャンセルしました")
 
-        _si_readline("  [Enter で再生を再開] ")
+        # ★★★ 保存できたらEnter待ちをせず、そのままジャケット表示に戻る ★★★
+        # 以前は「[Enter で再生を再開]」と表示していたが、実際には再生は
+        # 止まっていないためEnterを押しても何も起きず、ジャケットも戻らなかった。
+        if _saved_ok:
+            with terminal_io_lock:
+                print("\n  🖼️  ジャケット表示に戻ります...")
+                sys.stdout.flush()
+            time.sleep(0.4)
+            if not _redisplay_current_cover():
+                with terminal_io_lock:
+                    print("  ℹ️  ジャケット画像が見つかりませんでした（再生は継続中です）")
+                    sys.stdout.flush()
+        else:
+            _si_readline("  [Enter で画面に戻る] ")
     finally:
         _si_display_event.set()
 
@@ -10944,6 +11225,35 @@ def keyboard_listener():
                     terminal_print(f"\n🎚️  入力ゲインプリセット: {_gain_labels[current_gain_preset]}  ([g]で切替 / [s]で保存)")
                     replay_requested = True  # 現在曲に即反映
 
+                elif key in ('1', '2', '3', '4', '5', '6'):
+                    # ★★★ [1]〜[6] DSPモードをその場で直接切り替え ★★★
+                    if dsp_mode_active:
+                        if switch_dsp_venue(key):
+                            # ★ 音声(ffmpeg→aplay)は止めずに、ジャケット画面のバッジだけ
+                            #   新しいDSPモードに合わせて再描画する(曲の頭出しは発生しない)。
+                            _redisplay_current_cover()
+                    else:
+                        terminal_print("\n⚠️ DSPモードで起動していないため音場切替はできません(起動時にLoopbackを選択してください)")
+
+                elif key == 'u':
+                    # ★★★ [u] USB出力デジタルノイズ対策を両方まとめてON/OFF切り替え(A/B比較用) ★★★
+                    toggle_usb_audio_output()
+                    terminal_print(format_guard_status())
+
+                elif key == 'k':
+                    # ★★★ [k] USBオートサスペンド対策のみON/OFF切り替え(原因切り分け用) ★★★
+                    toggle_autosuspend_guard()
+                    terminal_print(format_guard_status())
+
+                elif key == 'j':
+                    # ★★★ [j] リアルタイム優先度対策のみON/OFF切り替え(原因切り分け用) ★★★
+                    toggle_rtprio_guard()
+                    terminal_print(format_guard_status())
+
+                elif key == 'm':
+                    # ★★★ [m] USBノイズ対策の現在の状態を表示(実際のシステム状態を読み取る) ★★★
+                    terminal_print("\n" + format_guard_status())
+
                 elif key == 's':
                     # ★★★ [s] 現在の全音響設定をプロファイルとして保存 ★★★
                     _do_save_profile()
@@ -10951,7 +11261,7 @@ def keyboard_listener():
                     # 画面クリア後にコントロール表示を再描画
                     try:
                         time.sleep(0.1)
-                        terminal_print("\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [q]終了してメニューへ")
+                        terminal_print("\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態) | [q]終了してメニューへ")
                         _gp_l = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
                         terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_l.get(current_gain_preset, current_gain_preset)}) | [c]フィルター | [s]保存", end="")
                         if SI_AVAILABLE:
@@ -10962,7 +11272,7 @@ def keyboard_listener():
                         pass
                     # ── 画面クリア後にキーガイドを再表示 ──
                     time.sleep(0.1)
-                    terminal_print("\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [q]終了してメニューへ")
+                    terminal_print("\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態) | [q]終了してメニューへ")
                     _fp = FILTER_PRESET_LABELS.get(current_filter_preset, current_filter_preset)
                     _gp_l2 = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
                     terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_l2.get(current_gain_preset, current_gain_preset)}) | [c]フィルター ({_fp}) | [s]保存", end="")
@@ -11120,8 +11430,17 @@ def create_concat_file_for_gapless(tracks, temp_dir):
         for track in tracks:
             track_path = track.get('path', '')
             if os.path.exists(track_path):
-                # ファイルパスにシングルクォートが含まれる場合のエスケープ
-                safe_path = track_path.replace("'", "\'\''")
+                # ★★★ シングルクォートのエスケープ修正 ★★★
+                # 以前は "'" を "'''"（3連続クォート）に置換していたが、これは
+                # ffmpegのconcatファイル書式では正しいエスケープになっていない。
+                # 正しくは、閉じクォート＋バックスラッシュエスケープしたクォート＋
+                # 開きクォートの "'\''" （4文字）でなければならない。
+                # 誤った "'''" のままだと、ファイル名にアポストロフィを含む曲
+                # （例: "L'istesso tempo" のようなイタリア語のテンポ表記）で
+                # パスが途中で切れて解釈され、ffmpegが次のファイルを開けずに
+                # 「No such file or directory」でその場でストリームが終了して
+                # しまう（＝ギャップレス再生が1曲目で突然終わる不具合の実際の原因）。
+                safe_path = track_path.replace("'", "'\\''")
                 f.write(f"file '{safe_path}'\n")
 
     return concat_file_path
@@ -11728,6 +12047,9 @@ def select_output_device_interactive():
             chosen = devices[raw]
             output_device = chosen['hw']
             print(f"✅ 出力デバイス: {output_device}  ({chosen['name']})")
+            _usb_cnum = card_num_from_alsa_device(output_device)
+            if _usb_cnum is not None:
+                optimize_usb_audio_output(_usb_cnum)
             return output_device
         print("⚠️ 有効な番号を入力してください")
 
@@ -11735,6 +12057,9 @@ def select_output_device_interactive():
         print(f"✅ DSP標準出力カードとして hw:2,0 を自動選択しました")
     else:
         print(f"✅ デバイスを維持します: {output_device}")
+    _usb_cnum = card_num_from_alsa_device(output_device)
+    if _usb_cnum is not None:
+        optimize_usb_audio_output(_usb_cnum)
     return output_device
 
 
@@ -12872,9 +13197,18 @@ if __name__ == "__main__":
                 _time.sleep(1.0)
                 print(f"🎛️  DSP v{_dsp_choice} 起動完了")
                 dsp_mode_active = True
+                current_dsp_venue = _dsp_choice  # ★ ジャケットバッジ・[1-6]切替の初期値として記録
                 # ★ CamillaDSP/wobbleはここで一度だけ起動する常駐プロセス。
                 #   プログラム終了時にのみ確実に停止させる（途中のcleanup_processes()では止めない）
                 atexit.register(shutdown_dsp)
+
+                # ★★★ USB出力デジタルノイズ対策（オートサスペンド無効化+RT優先度付与） ★★★
+                _usb_cnum = card_num_from_alsa_device(_dac_device)
+                if _usb_cnum is not None:
+                    optimize_usb_audio_output(
+                        _usb_cnum,
+                        extra_pids=[_bi._cdsp_proc.pid, _bi._wobble_proc.pid]
+                    )
 
         # ★★★ 起動時マイク設定（--no-voice 未指定時のみ） ★★★
         if args.voice:

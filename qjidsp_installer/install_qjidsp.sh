@@ -79,6 +79,7 @@ echo "  4. deno（YouTube Music再生の安定化に使用）のインストー�
 echo "  5. 仮想サウンドカード(snd-aloop)の設定"
 echo "  6. ${QJI_DIR}/ へQji本体一式＋DSP関連ファイル（音場v1〜v6）を配置"
 echo "  7. 既存ファイルをDSP対応版に更新（旧版は自動バックアップ）"
+echo "  8. USB出力デジタルノイズ対策（USB-Noise-Guard）のセットアップ（任意・root権限）"
 echo ""
 read -rp "続行しますか？ [Y/n] " answer
 case "$answer" in
@@ -259,6 +260,8 @@ backup_and_install "qji_soundcloud.py"
 backup_and_install "qji_soundcloud_browser.py"
 backup_and_install "qji_ytmusic.py"
 backup_and_install "qji_ytmusic_browser.py"
+backup_and_install "usb_noise_guard.py"
+backup_and_install "install_usb_audio_optimize.sh"
 
 # 古いバイトコードキャッシュが残っていると変更が反映されないことがあるため削除
 if [ -d "$QJI_DIR/__pycache__" ]; then
@@ -381,7 +384,40 @@ fi
 ok "VERSIONファイル／アップデートスクリプトを配置し、デスクトップに「QjiDSPアップデート確認」アイコンを作成しました"
 
 # -------------------------------------------------------------
-# ステップ7: デスクトップアイコンの更新確認
+# ステップ7: USB出力デジタルノイズ対策（USB-Noise-Guard）のセットアップ
+# -------------------------------------------------------------
+# USBオートサスペンドの無効化とリアルタイム優先度の付与にはOS側の設定
+# （udevルール作成・audioグループへの権限付与）が必要で、これにはroot権限
+# が要る。接続中のUSB DACを自動検出してルールを作るため、DACを接続した
+# 状態で実行する必要がある。失敗してもインストール全体は継続させたいため、
+# `sudo bash ...` の結果は if で受け、set -e で全体が止まらないようにする。
+step "USB出力デジタルノイズ対策（USB-Noise-Guard）のセットアップ"
+
+if [ -f "$QJI_DIR/install_usb_audio_optimize.sh" ]; then
+    chmod +x "$QJI_DIR/install_usb_audio_optimize.sh"
+    echo ""
+    echo "USB出力のデジタルノイズ対策（USBオートサスペンド無効化＋リアルタイム優先度の付与）には"
+    echo "root権限でのOS設定が1回だけ必要です（接続中のUSB DACを自動検出してudevルールを作成します）。"
+    read -rp "今すぐ設定しますか？（USB DACを接続した状態で実行してください） [Y/n] " usb_answer
+    case "$usb_answer" in
+        [nN]*)
+            warn "スキップしました。後で手動で実行する場合: sudo bash ${QJI_DIR}/install_usb_audio_optimize.sh"
+            ;;
+        *)
+            if sudo bash "$QJI_DIR/install_usb_audio_optimize.sh"; then
+                ok "USB-Noise-Guardのセットアップが完了しました（一度ログアウト→ログインすると完全に有効になります）"
+            else
+                warn "USB-Noise-Guardのセットアップが完了しませんでした。後で手動実行してください:"
+                warn "  sudo bash ${QJI_DIR}/install_usb_audio_optimize.sh"
+            fi
+            ;;
+    esac
+else
+    warn "install_usb_audio_optimize.sh が同梱パッケージに見つかりません。USB-Noise-Guardのセットアップをスキップします。"
+fi
+
+# -------------------------------------------------------------
+# ステップ8: デスクトップアイコンの更新確認
 # -------------------------------------------------------------
 step "デスクトップアイコンの確認"
 
@@ -399,7 +435,7 @@ fi
 # -------------------------------------------------------------
 step "動作確認"
 
-for pyfile in qji.py qji_qobuzdsp.py qji_qobuz_browser.py qji_soundcloud.py qji_soundcloud_browser.py qji_ytmusic.py qji_ytmusic_browser.py; do
+for pyfile in qji.py qji_qobuzdsp.py qji_qobuz_browser.py qji_soundcloud.py qji_soundcloud_browser.py qji_ytmusic.py qji_ytmusic_browser.py usb_noise_guard.py; do
     if [ -f "$QJI_DIR/$pyfile" ]; then
         python3 -c "import ast; ast.parse(open('$QJI_DIR/$pyfile').read())" \
             && ok "$pyfile 構文チェックOK" \
@@ -441,6 +477,11 @@ echo "    5) 倍音モード　　　　6) 倍音モード（ヘッドホン用�
 echo ""
 echo "  ご使用のDAC（オーディオインターフェース）は、"
 echo "  DSPモード選択後に自動検出・選択できます。"
+echo ""
+echo "  USB出力デジタルノイズ対策（USB-Noise-Guard）:"
+echo "    再生中に u（全体ON/OFF）/ k（オートサスペンド対策のみ）/"
+echo "    j（RT優先度対策のみ）/ m（状態表示）キーでその場A/B比較ができます。"
+echo "    設定をスキップした場合は後から sudo bash ${QJI_DIR}/install_usb_audio_optimize.sh"
 echo ""
 echo "  denoのPATHは ~/.bashrc に追加済みです。"
 echo "  新しいターミナルを開くか、'source ~/.bashrc' を実行すると反映されます。"
