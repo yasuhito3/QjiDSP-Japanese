@@ -346,14 +346,39 @@ if [ -f "$SCRIPT_DIR/update_qjidsp.sh" ]; then
     cp "$SCRIPT_DIR/update_qjidsp.sh" "$QJI_DIR/update_qjidsp.sh"
     chmod +x "$QJI_DIR/update_qjidsp.sh"
 fi
-if [ -f "$SCRIPT_DIR/QjiDSPアップデート確認.desktop" ]; then
-    cp "$SCRIPT_DIR/QjiDSPアップデート確認.desktop" "$QJI_DIR/QjiDSPアップデート確認.desktop"
-    chmod +x "$QJI_DIR/QjiDSPアップデート確認.desktop"
-    if command -v gio >/dev/null 2>&1; then
-        gio set "$QJI_DIR/QjiDSPアップデート確認.desktop" "metadata::trusted" true >/dev/null 2>&1 || true
-    fi
+
+# --- デスクトップへ「QjiDSPアップデート確認」アイコンを生成 ---
+# Qji本体の起動アイコンと同じように、絶対パスを埋め込んだ.desktopを
+# その場でユーザーのデスクトップに生成する。qjidsp_installer/フォルダに
+# 同梱のファイルをそのままコピーする方式(相対パス実行)だと、ファイル
+# マネージャーによってはカレントディレクトリの扱いが異なり動かない
+# ことがあるため、インストール時点で判明している絶対パスを直接書き込む。
+UPDATE_DESKTOP_DIR="$(xdg-user-dir DESKTOP 2>/dev/null)"
+[ -z "$UPDATE_DESKTOP_DIR" ] && UPDATE_DESKTOP_DIR="$HOME/Desktop"
+mkdir -p "$UPDATE_DESKTOP_DIR"
+
+UPDATE_DESKTOP_FILE="$UPDATE_DESKTOP_DIR/QjiDSPアップデート確認.desktop"
+cat > "$UPDATE_DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=QjiDSP アップデート確認
+Name[ja]=QjiDSP アップデート確認
+GenericName=QjiDSP Update Checker
+Comment=GitHub上の最新バージョンを確認し、必要ならQjiDSPをアップデートします
+Exec=bash "${QJI_DIR}/update_qjidsp.sh"
+Icon=system-software-update
+Terminal=true
+StartupNotify=false
+Categories=System;Utility;
+Keywords=Qji;QjiDSP;CamillaDSP;update;アップデート;
+EOF
+chmod +x "$UPDATE_DESKTOP_FILE"
+if command -v gio >/dev/null 2>&1; then
+    gio set "$UPDATE_DESKTOP_FILE" "metadata::trusted" true >/dev/null 2>&1 || true
 fi
-ok "VERSIONファイル／アップデートスクリプト／アップデート確認アイコンを配置しました"
+
+ok "VERSIONファイル／アップデートスクリプトを配置し、デスクトップに「QjiDSPアップデート確認」アイコンを作成しました"
 
 # -------------------------------------------------------------
 # ステップ7: デスクトップアイコンの更新確認
@@ -421,7 +446,7 @@ echo "  denoのPATHは ~/.bashrc に追加済みです。"
 echo "  新しいターミナルを開くか、'source ~/.bashrc' を実行すると反映されます。"
 echo ""
 echo "  アップデートの確認:"
-echo "    cd ${QJI_DIR} && bash update_qjidsp.sh"
-echo "    (または ${QJI_DIR}/QjiDSPアップデート確認.desktop をダブルクリック)"
+echo "    デスクトップの「QjiDSPアップデート確認」アイコンをダブルクリック"
+echo "    (またはターミナルから: cd ${QJI_DIR} && bash update_qjidsp.sh)"
 echo -e "${GREEN}${BOLD}============================================================${RESET}"
 read -rp "Enterキーで閉じます..." _

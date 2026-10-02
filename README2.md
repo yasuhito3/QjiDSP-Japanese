@@ -1,6 +1,3 @@
-**🟢 初めてQjiDSPをお使いになる方へ**  
-[まずはこちらをご覧ください →](https://github.com/yasuhito3/QjiDSP-Japanese/blob/main/QjiDSP_Quick_Start_Japanese.md) `QjiDSP Quick Start Guide`
-
 # Qji（奏在）
 
 Linux 向けのハイファイ音楽再生システムです。ローカルファイル再生に加え、Qobuz・SoundCloud・YouTube Music のストリーミング再生、CamillaDSP による3D空間音響拡張（音場 v1〜v6）、ジャンル適応型EQ（Sonia Intelligence）、自動歪み軽減（Auto De-Clip）などを統合しています。
@@ -31,8 +28,6 @@ Linux 向けのハイファイ音楽再生システムです。ローカルフ�
 
 ---
 
-
-
 ## 動作環境
 
 - Linux（Ubuntu / Linux Mint 系で動作確認）
@@ -43,11 +38,7 @@ Linux 向けのハイファイ音楽再生システムです。ローカルフ�
 
 ---
 
-
-
 ## インストール
-
-
 
 ### 0. 前提：Qji本体のインストール（未導入の場合）
 
@@ -59,8 +50,6 @@ cd Qji-Network-Audio-Player
 # Qji本体側のインストール手順に従ってください
 ```
 
-
-
 ### 1. 本リポジトリ（QjiDSP拡張）を取得
 
 ```bash
@@ -68,11 +57,9 @@ git clone https://github.com/yasuhito3/QjiDSP-Japanese.git
 cd QjiDSP-Japanese/qjidsp_installer
 ```
 
-> 📦 インストーラー本体・DSP設定ファイル・IRファイル等は、すべて `qjidsp_installer/` **フォルダの中** にまとめてあります。
+> 📦 インストーラー本体・DSP設定ファイル・IRファイル等は、すべて **`qjidsp_installer/` フォルダの中** にまとめてあります。
 > GitHubの「Download ZIP」で取得した場合は、展開後にできる `QjiDSP-Japanese-main/` のようなフォルダの中の、
 > さらに `qjidsp_installer/` フォルダまで進んでから、次のステップを実行してください。
-
-
 
 ### 2. インストーラーを実行
 
@@ -109,31 +96,20 @@ cd ~/qji && python3 qji.py
 
 ---
 
-
-
 ## アップデート
 
-一度インストールすれば、以後は毎回ZIPを再ダウンロードしたり`git clone`し直したり
-する必要はありません。インストール時に、Qji本体の起動アイコンと同じように
-**デスクトップ**へ「QjiDSPアップデート確認」アイコンが自動的に作成されます。
+一度インストールすれば、以後は毎回ZIPを再ダウンロードしたり`git clone`し直したりする必要はありません。インストール時に、Qji本体の起動アイコンと同じようにデスクトップへ「QjiDSPアップデート確認」アイコンが自動的に作成されます。
 
 - **デスクトップアイコンから**: 「QjiDSPアップデート確認」アイコンをダブルクリック
 - **ターミナルから**: `cd ~/qji && bash update_qjidsp.sh`
 
-このリポジトリの`VERSION`ファイルを確認し、新しいバージョンがあれば確認のうえ
-自動的にダウンロードし、最新のファイルで`install_qjidsp.sh`を実行し直します
-（上書きされる既存ファイルはインストーラーの仕様により自動的にタイムスタンプ付き
-でバックアップされます）。すでに最新版の場合は、その旨を表示して終了します。
+このリポジトリの`VERSION`ファイルを確認し、新しいバージョンがあれば確認のうえ自動的にダウンロードし、最新のファイルで`install_qjidsp.sh`を実行し直します（上書きされる既存ファイルはインストーラーの仕様により自動的にタイムスタンプ付きでバックアップされます）。すでに最新版の場合は、その旨を表示して終了します。
 
 Qji Peak Monitorのアップデート確認と同じ方式です。
 
 ---
 
-
-
 ## 任意設定
-
-
 
 ### YouTube Music（ライブラリ連携）
 
@@ -157,7 +133,7 @@ python3 -c "from ytmusicapi import YTMusic; YTMusic.setup(filepath='~/.config/qj
 
 ### Qji Peak Monitor（ステレオVUメーター）
 
-⚠️ **本インストーラー（**`install_qjidsp.sh`**）には含まれていません。** 独立したオプションのリポジトリとして公開しています：
+⚠️ **本インストーラー（`install_qjidsp.sh`）には含まれていません。** 独立したオプションのリポジトリとして公開しています：
 👉 **[Qji Peak Monitor](https://github.com/yasuhito3/Qji-peak-monitor)**
 
 Qjiの最終出力段をリアルタイムに可視化する、スタンドアロンのステレオピーク（VU）メーターです。
@@ -165,8 +141,6 @@ QjiDSP経由で聴く際に生じる下流バッファ分のズレを補正す�
 インストール方法・使い方は、そちらのリポジトリのREADMEを参照してください。
 
 ---
-
-
 
 ## コマンドラインオプション
 
@@ -179,8 +153,6 @@ python3 qji.py --no-voice                       # 音声認識を無効化して
 ```
 
 ---
-
-
 
 ## トラブルシューティング
 
@@ -200,15 +172,11 @@ speaker-test -D hw:CARD=Loopback,DEV=0 -c 2 -r 48000 -F S32_LE
 
 ---
 
-
-
 ## ディレクトリ構成（インストール後）
 
 ```
 ~/qji/
 ├── qji.py                      # 本体
-├── VERSION                     # インストール済みバージョン(update_qjidsp.shが参照)
-├── update_qjidsp.sh            # アップデート確認スクリプト(本体)
 ├── qji_qobuzdsp.py             # Qobuz モジュール
 ├── qji_qobuz_browser.py        # Qobuz ブラウザUI
 ├── qji_soundcloud.py           # SoundCloud モジュール
@@ -226,8 +194,6 @@ speaker-test -D hw:CARD=Loopback,DEV=0 -c 2 -r 48000 -F S32_LE
 ```
 
 ---
-
-
 
 ## 謝辞・使用ライブラリ
 
