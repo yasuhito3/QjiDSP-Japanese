@@ -7,6 +7,8 @@ qji.py から Q キーで呼び出される。
   [n]次  [b]前  [q]メニューへ
   [g]ゲイン切替  [G]ギャップレス ON/OFF  [w]APL ON/OFF  [c]プリセット選択
   [+]/[=]音量+1dB  [-]音量-1dB
+  [0] DSPバイパス(素通し)ON/OFF  [1]〜[6] DSP音場切替（DSPモード時のみ。qji.py の関数を使用）
+  [u]/[k]/[j] USBノイズ対策の切替（全体/オートサスペンド/RT優先度）  [m] 状態表示（yでも可。qji.py の関数を使用）
   [s]音響設定を保存
 """
 
@@ -81,6 +83,50 @@ def _is_dsp_mode_active() -> bool:
         return bool(getattr(main_mod, 'dsp_mode_active', False))
     except Exception:
         return False
+
+
+def _switch_dsp_venue_via_main(key: str) -> Optional[bool]:
+    """
+    呼び出し元(qji.py = __main__)の switch_dsp_venue() で DSP音場(v1〜v6)を切り替える。
+    戻り値: True=切替成功 / False=失敗 / None=すでにその音場（何もしていない）
+    """
+    main_mod = sys.modules.get('__main__')
+    # [0] = DSPバイパス(素通し)のON/OFF、[1]〜[6] = 音場切替
+    fn = getattr(main_mod, 'toggle_dsp_bypass' if key == '0' else 'switch_dsp_venue', None)
+    if not callable(fn):
+        print('  ⚠ DSP切替関数が見つかりません（qji.py から起動していますか？）')
+        return False
+    if key != '0' and getattr(main_mod, 'current_dsp_venue', None) == key:
+        return None
+    return bool(fn() if key == '0' else fn(key))
+
+
+def _usb_guard_summary_via_main() -> str:
+    """qji.py(__main__) の _usb_guard_summary() で、USBノイズ対策の現在状態を文字列で返す。"""
+    try:
+        fn = getattr(sys.modules.get('__main__'), '_usb_guard_summary', None)
+        return fn() if callable(fn) else '?'
+    except Exception:
+        return '?'
+
+
+def _usb_guard_action(key: str) -> None:
+    """[u]両方 / [k]オートサスペンドのみ / [j]RT優先度のみ をON/OFF切替、[m]/[y]は状態表示のみ。
+    実処理は qji.py(__main__) 側の関数（usb_noise_guard 連携）を呼ぶ。"""
+    main_mod = sys.modules.get('__main__')
+    if key in ('u', 'k', 'j'):
+        names = {'u': 'toggle_usb_audio_output', 'k': 'toggle_autosuspend_guard', 'j': 'toggle_rtprio_guard'}
+        labels = {'u': 'USB出力ノイズ対策', 'k': 'USBオートサスペンド対策のみ', 'j': 'リアルタイム優先度対策のみ'}
+        fn = getattr(main_mod, names[key], None)
+        if not callable(fn):
+            print('  ⚠ USBノイズ対策の関数が見つかりません（qji.py から起動していますか？）')
+            return
+        new_state = fn()
+        if new_state is True:
+            print(f'\n🔌 {labels[key]}: ON')
+        elif new_state is False:
+            print(f'\n🔌 {labels[key]}: OFF')
+    print(f'🔌 USBノイズ対策の現状: {_usb_guard_summary_via_main()}  (AS=オートサスペンド対策 / RT=リアルタイム優先度)')
 
 _incognito_proc: Optional[subprocess.Popen] = None
 _incognito_tmp_dir: Optional[str] = None
@@ -1372,6 +1418,43 @@ def _key_listener_thread(state: dict, fd_orig_settings):
                     _save_to_favorites(state)
                     tty.setraw(fd)
 
+                elif cl in ('u', 'k', 'j', 'm', 'y'):
+                    # ★ USBノイズ対策の切替/状態表示（qji.py 側の関数を使用）。
+                    #   切替中の print の改行崩れを避けるため raw を一旦解除する。
+                    termios.tcsetattr(fd, termios.TCSANOW, fd_orig_settings)
+                    try:
+                        _usb_guard_action(cl)
+                    finally:
+                        try:
+                            termios.tcflush(fd, termios.TCIFLUSH)
+                        except Exception:
+                            pass
+                        tty.setraw(fd)
+
+                elif cl in ('0', '1', '2', '3', '4', '5', '6'):
+                    # ★ [0]=DSPバイパス(素通し)ON/OFF、[1]〜[6]=DSP音場をその場で切り替え。音声(ffmpeg→aplay)は止めず、
+                    #   曲の頭出しも発生しない（qji.py ローカル再生の[1]〜[6]キーと同じ挙動）。
+                    # 切替中(約4秒)は print の改行崩れを避けるため raw を一旦解除する。
+                    termios.tcsetattr(fd, termios.TCSANOW, fd_orig_settings)
+                    if not _is_dsp_mode_active():
+                        print('\r  ⚠ DSPモードが有効ではありません（起動時にDSPを選択していません）')
+                        result = False
+                    else:
+                        result = _switch_dsp_venue_via_main(cl)
+                        if result is None:
+                            print(f'\r  ℹ すでに v{cl} です')
+                    try:
+                        termios.tcflush(fd, termios.TCIFLUSH)   # 切替中に溜まったキー入力を破棄
+                    except Exception:
+                        pass
+                    tty.setraw(fd)
+                    # ジャケット画像が表示中なら、音場バッジを更新するため再描画する
+                    if result and _feh_proc and _feh_proc.poll() is None and not _feh_hidden:
+                        _feh_show(
+                            track_info=state.get('current_track_info'),
+                            jacket_path=state.get('current_jacket_path'),
+                        )
+
                 elif cl == 'a':
                     # 自動ジャンル検出モード（手動ロックを解除して再適用）
                     try:
@@ -1781,7 +1864,7 @@ def _play_list(client: QobuzClient, tracks: List[dict],
         print(f'\n  ♫  {t.get("artist", "")} — {t.get("title", "")}{dur}')
         gapless_ind = ' 🔗GL' if state.get('gapless') else ''
         q_hint = '[q]次のPLへ' if state.get('playlist_queue_mode') else '[q]終了'
-        print(f'     [n]次 [b]前 {q_hint} [g]ゲイン [G]ギャップレス{gapless_ind} [w]APL [c]プリセット手動 [a]自動検出 [+/-]音量 [s]保存 [i]画像 [ESC]画像消')
+        print(f'     [n]次 [b]前 {q_hint} [g]ゲイン [G]ギャップレス{gapless_ind} [w]APL [c]プリセット手動 [a]自動検出 [+/-]音量 [0]バイパス/[1-6]音場 [u/k/j/m]USB:{_usb_guard_summary_via_main()} [s]保存 [i]画像 [ESC]画像消')
 
         tid = t['track_id']
         if tid not in cached_url:

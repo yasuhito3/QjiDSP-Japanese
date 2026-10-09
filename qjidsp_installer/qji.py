@@ -8,6 +8,13 @@ Qji.py - 日本語対応改善版（エンコーディング強化）+ プリセ
 - 保存したプリセットをいつでも読み込んで適用可能
 - プリセット一覧の表示と削除機能
 - 設定ファイル: ~/.music_player_presets.json
+
+【追加機能】DSP音場の切替・バイパス
+- ホーム画面の [D] から DSP音場(v1〜v6)を切替
+- ラジオ/AirPlay/DLNA再生中も [1]〜[6] で音場切替、[0] でDSPバイパス(素通し)ON/OFF
+- 手元音源の再生中も [0] でDSPバイパス(素通し)ON/OFF
+- ラジオのリセットキーを [0] から [r] に変更
+- 再生中の [u]/[k]/[j]/[y] で USB出力ノイズ対策の切替・状態表示（usb_noise_guard.py が必要。未導入でも動作します）
 """
 
 import os
@@ -72,7 +79,7 @@ except Exception as _si_e:
 try:
     from usb_noise_guard import (
         optimize_usb_audio_output, card_num_from_alsa_device, toggle_usb_audio_output,
-        toggle_autosuspend_guard, toggle_rtprio_guard, format_guard_status,
+        toggle_autosuspend_guard, toggle_rtprio_guard,
     )
     USB_NOISE_GUARD_AVAILABLE = True
 except Exception as _ung_e:
@@ -87,9 +94,7 @@ except Exception as _ung_e:
         return None
     def toggle_rtprio_guard(*_a, **_kw):
         return None
-    def format_guard_status(*_a, **_kw):
-        return "🔌 USBノイズ対策: 利用不可"
-    print(f"⚠️  USB出力ノイズ対策システム: 無効 ({_ung_e})")
+    print(f"ℹ️  USB出力ノイズ対策システム: 未導入のため無効です（usb_noise_guard.py を qji.py と同じフォルダに置くと有効になります）")
 # ===== ★★★ USB出力デジタルノイズ対策システム ここまで ★★★ =====
 
 # Webサーバー用インポート
@@ -251,7 +256,9 @@ DSP_VENUE_LABELS = {
     '4': '🎙️ 素材の味(動)',
     '5': '🎻 倍音モード',
     '6': '🎧 倍音モード(HP)',
+    '0': '⚪ DSPバイパス(素通し)',
 }  # ★ ジャケット画面バッジ表示用ラベル（起動時のDSPモード選択メニューの説明文と対応）
+_dsp_venue_before_bypass = None  # ★ bypass([0])ON直前の音場(1〜6)。解除時にここへ戻す
 current_playing_track = None
 current_image_path = None
 next_track_requested = False
@@ -3390,6 +3397,7 @@ def _switch_dsp_venue_impl(dsp_choice):
     """switch_dsp_venue()の実処理本体。例外送出の可能性があるため、
     呼び出し元のswitch_dsp_venue()側で必ずtry/exceptして守ること。"""
     global current_dsp_venue
+    _usb_prev = _usb_guard_status()  # ★ 切替前のUSBノイズ対策の状態（再起動後のPIDへ引き継ぐため）
     _HOME = os.path.expanduser("~")
     _live_yml = f'{_HOME}/camilladsp_test/spatial_final.yml'
 
@@ -3435,9 +3443,16 @@ def _switch_dsp_venue_impl(dsp_choice):
     except Exception as _e:
         terminal_print(f"⚠️ 現在のDAC設定の読み取りに失敗: {_e}")
 
-    terminal_print(f"\n🎛️ DSP v{dsp_choice} へ切り替えます...")
-    shutdown_dsp()
+    # ★ 事前検証: 新しいVenueの設定ファイル/wobbleスクリプトが無い場合は、何も止めずに中止する。
+    #   （先に shutdown_dsp() してから失敗すると、CamillaDSPが止まったまま無音になるため）
+    _missing = [_p for _p in (_yml_map[dsp_choice], _wobble_map[dsp_choice]) if not os.path.exists(_p)]
+    if _missing:
+        terminal_print(f"❌ DSP v{dsp_choice} に必要なファイルが見つかりません（切り替えは行いません。再生は継続します）:")
+        for _p in _missing:
+            terminal_print(f"   - {_p}")
+        return False
 
+    # ★ 新しいVenueのYAMLの読み込み・加工は、DSPを止める前に済ませる
     try:
         with open(_yml_map[dsp_choice], 'r', encoding='utf-8') as _f_src:
             _yml_content = _f_src.read()
@@ -3462,6 +3477,14 @@ def _switch_dsp_venue_impl(dsp_choice):
                 _new_lines2.append(_line)
             _yml_content = ''.join(_new_lines2)
 
+    except Exception as _e:
+        terminal_print(f"❌ YAML書き換えに失敗しました: {_e}")
+        return False
+
+    terminal_print(f"\n🎛️ DSP v{dsp_choice} へ切り替えます...")
+    shutdown_dsp()
+
+    try:
         with open(_live_yml, 'w', encoding='utf-8') as _f_dst:
             _f_dst.write(_yml_content)
     except Exception as _e:
@@ -3491,9 +3514,308 @@ def _switch_dsp_venue_impl(dsp_choice):
         stdout=_watchdog_log, stderr=_watchdog_log
     )
 
+    _reapply_usb_guard(_usb_prev)  # ★ 新しいCamillaDSP/wobbleのPIDにもRT優先度を引き継ぐ
     current_dsp_venue = dsp_choice
     terminal_print(f"✅ DSP v{dsp_choice} へ切り替えました")
     return True
+
+
+def _usb_guard_status():
+    """★ USB出力ノイズ対策の「実際の状態」をシステムから直接調べる（外部モジュールに依存しない）。
+    戻り値: {'as': True/False/None, 'rt': True/False/None}
+      as = USBオートサスペンド対策(power/control が "on" ならON)
+      rt = CamillaDSPのリアルタイム優先度(SCHED_FIFO/RRならON)
+      None = 判定不能（USB DAC出力でない、プロセスが無い等）"""
+    import builtins as _b_ug
+    _st = {'as': None, 'rt': None}
+    _cnum = getattr(_b_ug, '_qji_usb_cnum', None)
+    if _cnum is None:
+        return _st
+    try:
+        _dev = os.path.realpath(f'/sys/class/sound/card{_cnum}/device')
+        for _cand in (os.path.dirname(_dev), _dev):  # USBデバイス本体 → インターフェースの順
+            _ctl = os.path.join(_cand, 'power', 'control')
+            if os.path.exists(_ctl):
+                with open(_ctl) as _f:
+                    _st['as'] = (_f.read().strip() == 'on')
+                break
+    except Exception:
+        pass
+    try:
+        _cp = getattr(_b_ug, '_cdsp_proc', None)
+        if _cp is not None and _cp.poll() is None:
+            _r = subprocess.run(['ps', '-o', 'cls=', '-p', str(_cp.pid)],
+                                capture_output=True, text=True, timeout=1)
+            _cls = _r.stdout.strip()
+            if _cls:
+                _st['rt'] = _cls in ('FF', 'RR')
+    except Exception:
+        pass
+    return _st
+
+
+def _usb_guard_summary():
+    """★ キーガイド等に出す短い状態表示。例: 'AS:ON RT:OFF' / 'USB出力ではないため対象外'"""
+    if not USB_NOISE_GUARD_AVAILABLE:
+        return "usb_noise_guard 未導入"
+    _st = _usb_guard_status()
+    if _st['as'] is None and _st['rt'] is None:
+        return "対象外(USB DAC出力のみ)"
+    _f = lambda v: '?' if v is None else ('ON' if v else 'OFF')
+    return f"AS:{_f(_st['as'])} RT:{_f(_st['rt'])}"
+
+
+def _reapply_usb_guard(prev_state):
+    """★ 音場切替でCamillaDSP/wobbleのPIDが変わった後、切替前にRT優先度対策がONだった場合のみ
+    新しいPIDへ引き継ぐ。オートサスペンド対策だけ意図的にOFFにしていた場合は、その状態を保つ。"""
+    try:
+        import builtins as _b_ru
+        if not (prev_state and prev_state.get('rt')):
+            return
+        _cnum = getattr(_b_ru, '_qji_usb_cnum', None)
+        if _cnum is None:
+            return
+        _pids = []
+        for _n in ('_cdsp_proc', '_wobble_proc'):
+            _p = getattr(_b_ru, _n, None)
+            if _p is not None and _p.poll() is None:
+                _pids.append(_p.pid)
+        optimize_usb_audio_output(_cnum, extra_pids=_pids)
+        if prev_state.get('as') is False and _usb_guard_status().get('as'):
+            toggle_autosuspend_guard()  # 切替前にAS対策をOFFにしていた場合は元に戻す
+    except Exception as _e:
+        terminal_print(f"⚠️ USBノイズ対策の再付与に失敗しました（再生は継続）: {_e}")
+
+
+def _build_dsp_passthrough_yml(src_text):
+    """★ 現在のCamillaDSP設定(YAML)から「素通し(V0)」用YAMLを作る。
+    devices(入出力デバイス/サンプルレート等)は一字一句そのまま引き継ぎ、
+    mixers/filters/pipeline/processors を 0dBのGainだけのパイプラインに差し替える。
+    戻り値: (YAML文字列, None) 成功 / (None, エラー理由) 失敗"""
+    import re as _re_v0
+    _drop = ('mixers', 'filters', 'pipeline', 'processors')
+    blocks, cur_key, cur = [], None, []
+    for _ln in src_text.splitlines(keepends=True):
+        _m = _re_v0.match(r'^([A-Za-z_][\w-]*)\s*:', _ln)
+        if _m:
+            blocks.append((cur_key, cur))
+            cur_key, cur = _m.group(1), [_ln]
+        else:
+            cur.append(_ln)
+    blocks.append((cur_key, cur))
+
+    _dev = [b for k, b in blocks if k == 'devices']
+    if not _dev:
+        return None, "devices セクションが見つかりません"
+    _sec, _ch = None, {}
+    for _ln in _dev[0]:
+        _st = _ln.strip()
+        if _st == 'capture:':
+            _sec = 'capture'
+        elif _st == 'playback:':
+            _sec = 'playback'
+        else:
+            _mc = _re_v0.match(r'^\s+channels:\s*(\d+)', _ln)
+            if _mc and _sec and _sec not in _ch:
+                _ch[_sec] = int(_mc.group(1))
+    if 'capture' not in _ch or 'playback' not in _ch:
+        return None, "capture/playback のチャンネル数を読み取れません"
+    if _ch['capture'] != _ch['playback']:
+        return None, f"入出力のチャンネル数が異なります (capture={_ch['capture']}, playback={_ch['playback']})"
+    _n = _ch['playback']
+
+    _pipe_txt = ''.join(''.join(b) for k, b in blocks if k == 'pipeline')
+    _plural = (not _re_v0.search(r'\bchannel:\s*\d', _pipe_txt)) and bool(_re_v0.search(r'\bchannels:\s*\[', _pipe_txt))
+
+    _out = []
+    for _k, _b in blocks:
+        if _k in _drop:
+            continue
+        _out.append(''.join(_b))
+    _text = ''.join(_out)
+    if not _text.endswith('\n'):
+        _text += '\n'
+    _text += "\nfilters:\n  qji_v0_passthrough:\n    type: Gain\n    parameters:\n      gain: 0.0\n\npipeline:\n"
+    if _plural:
+        _text += "  - type: Filter\n    channels: [" + ", ".join(str(i) for i in range(_n)) + "]\n    names:\n      - qji_v0_passthrough\n"
+    else:
+        for _i in range(_n):
+            _text += f"  - type: Filter\n    channel: {_i}\n    names:\n      - qji_v0_passthrough\n"
+    return _text, None
+
+
+def _enable_dsp_bypass():
+    """★ CamillaDSPを再起動せず、設定をSIGHUPで素通し(V0)に差し替える。
+    手順: 素通しYAML生成 → camilladsp -c で検証 → wobble停止 → liveYAML置換 → SIGHUP → 生存/ログ確認。
+    検証に落ちた場合は何も変更しない。リロード後に異常があれば直前の音場へ再起動方式で復帰する。"""
+    global current_dsp_venue, _dsp_venue_before_bypass
+    import builtins as _bi_v0
+    import signal as _sig_v0
+    _HOME = os.path.expanduser("~")
+    _live_yml = f'{_HOME}/camilladsp_test/spatial_final.yml'
+    _prev = current_dsp_venue
+
+    try:
+        with open(_live_yml, 'r', encoding='utf-8') as _f:
+            _src = _f.read()
+    except Exception as _e:
+        terminal_print(f"❌ 現在のDSP設定を読めません: {_e}")
+        return False
+    _new, _err = _build_dsp_passthrough_yml(_src)
+    if _new is None:
+        terminal_print(f"❌ バイパス用設定を作れません: {_err}")
+        return False
+
+    _tmp_check = '/tmp/qji_v0_check.yml'
+    with open(_tmp_check, 'w', encoding='utf-8') as _f:
+        _f.write(_new)
+    try:
+        _r = subprocess.run(['camilladsp', '-c', _tmp_check], capture_output=True, text=True, timeout=10)
+    except Exception as _e:
+        terminal_print(f"❌ camilladsp の設定検証を実行できません: {_e}")
+        return False
+    if _r.returncode != 0:
+        _msg = ((_r.stdout or '') + (_r.stderr or '')).strip().splitlines()
+        terminal_print("❌ バイパス用設定の検証に失敗しました（何も変更していません）")
+        for _l in _msg[-4:]:
+            terminal_print(f"   {_l}")
+        return False
+
+    _cdsp = getattr(_bi_v0, '_cdsp_proc', None)
+    _pid = _cdsp.pid if (_cdsp and _cdsp.poll() is None) else None
+    if _pid is None:
+        try:
+            _pg = subprocess.run(['pgrep', '-x', 'camilladsp'], capture_output=True, text=True, timeout=2)
+            _pids = _pg.stdout.split()
+            _pid = int(_pids[0]) if _pids else None
+        except Exception:
+            _pid = None
+    if _pid is None:
+        terminal_print("❌ 動作中の CamillaDSP が見つかりません")
+        return False
+
+    terminal_print("\n⚪ DSPバイパス(素通し)へ切り替えます...")
+    # wobble は旧設定のフィルターを操作するため、先に止める
+    try:
+        _w = getattr(_bi_v0, '_wobble_proc', None)
+        if _w and _w.poll() is None:
+            _w.kill()
+        _wp = getattr(_bi_v0, '_wobble_script_path', None)
+        if _wp:
+            subprocess.run(['pkill', '-9', '-f', os.path.basename(_wp)], capture_output=True, timeout=1)
+    except Exception:
+        pass
+
+    _log = '/tmp/camilladsp.log'
+    try:
+        _log_pos = os.path.getsize(_log)
+    except Exception:
+        _log_pos = 0
+    try:
+        _tmp_live = _live_yml + '.v0tmp'
+        with open(_tmp_live, 'w', encoding='utf-8') as _f:
+            _f.write(_new)
+        os.replace(_tmp_live, _live_yml)
+        os.kill(_pid, _sig_v0.SIGHUP)
+    except Exception as _e:
+        terminal_print(f"❌ 設定の差し替えに失敗しました: {_e}")
+        if _prev and _prev != '0':
+            _switch_dsp_venue_impl(_prev)
+        return False
+
+    time.sleep(1.2)
+    # ★ 終了した Popen の子プロセスはゾンビとして残り、os.kill(pid, 0) が成功してしまうため、
+    #   Popen オブジェクトを持っている場合は poll() で生存を確認する
+    if _cdsp is not None and _cdsp.pid == _pid:
+        _alive = (_cdsp.poll() is None)
+    else:
+        _alive = True
+        try:
+            os.kill(_pid, 0)
+        except Exception:
+            _alive = False
+    _log_err = False
+    try:
+        with open(_log, 'r', errors='replace') as _f:
+            _f.seek(_log_pos)
+            _log_err = bool(re.search(r'\bERROR\b', _f.read()))
+    except Exception:
+        pass
+    if (not _alive) or _log_err:
+        terminal_print("❌ リロード後に異常を検出しました。直前の音場へ復帰します（/tmp/camilladsp.log を確認してください）")
+        if _prev and _prev != '0':
+            _switch_dsp_venue_impl(_prev)
+        return False
+
+    _dsp_venue_before_bypass = _prev if _prev and _prev != '0' else (_dsp_venue_before_bypass or '1')
+    current_dsp_venue = '0'
+    terminal_print("✅ DSPバイパス: ON（CamillaDSPは素通し。ffmpeg側の処理は別途 [c]→bypass）")
+    return True
+
+
+def toggle_dsp_bypass():
+    """★ [0]キー: DSPバイパス(V0)のON/OFF。OFF時は直前の音場へ再起動方式で戻す(約4秒)。
+    戻り値: 成功したらTrue、失敗したらFalse"""
+    try:
+        if current_dsp_venue == '0':
+            _back = _dsp_venue_before_bypass or '1'
+            terminal_print(f"\n🎛️ DSPバイパスを解除し、{DSP_VENUE_LABELS.get(_back, 'v' + _back)} に戻します...")
+            return _switch_dsp_venue_impl(_back)
+        return _enable_dsp_bypass()
+    except Exception as _e:
+        terminal_print(f"❌ DSPバイパス切替中に予期しないエラー: {_e}")
+        terminal_print("💡 再生は継続します。状態が不安定な場合は [1]〜[6] で音場を選び直してください。")
+        return False
+
+
+def _usb_guard_key_action(key):
+    """★ ラジオ/AirPlay/DLNA 再生中の [u]/[k]/[j]/[y] の共通処理（ローカル再生のキー処理と同じ動作）。
+    [u]=両方 / [k]=オートサスペンドのみ / [j]=RT優先度のみ をON/OFF切替、[m]/[y]=状態表示のみ。
+    ここでの例外は握りつぶし、再生ループを止めない。"""
+    try:
+        _legend = "(AS=オートサスペンド対策 / RT=リアルタイム優先度)"
+        _specs = {
+            'u': (toggle_usb_audio_output, "USB出力ノイズ対策: ON（オートサスペンド無効化+RT優先度あり）", "USB出力ノイズ対策: OFF（比較用に通常状態へ戻しました）"),
+            'k': (toggle_autosuspend_guard, "USBオートサスペンド対策のみ: ON", "USBオートサスペンド対策のみ: OFF"),
+            'j': (toggle_rtprio_guard, "リアルタイム優先度対策のみ: ON", "リアルタイム優先度対策のみ: OFF"),
+        }
+        if key in _specs:
+            _fn, _on, _off = _specs[key]
+            _st = _fn()
+            if _st is True:
+                terminal_print(f"\n🔌 {_on}")
+            elif _st is False:
+                terminal_print(f"\n🔌 {_off}")
+            terminal_print(f"🔌 現状: {_usb_guard_summary()}  {_legend}")
+        else:
+            terminal_print(f"\n🔌 USBノイズ対策の現状: {_usb_guard_summary()}  {_legend}")
+    except Exception as _e:
+        terminal_print(f"⚠️ USBノイズ対策の操作中にエラー（再生は継続します）: {_e}")
+
+
+def _switch_dsp_venue_from_stream_key(key):
+    """★ ラジオ/AirPlay/DLNA 再生中の[1]〜[6]キー用の共通ラッパー。
+    音声(ffmpeg→aplay)は止めず、CamillaDSPの音場だけを切り替える(約4秒)。
+    戻り値: True=切替成功 / False=失敗・DSP無効 / None=すでにその音場。"""
+    if not dsp_mode_active:
+        print("\n   ⚠️ DSPモードが有効ではありません（起動時にDSPを選択していません）")
+        return False
+    if key == '0':  # ★ DSPバイパス(素通し)ON/OFF
+        _ok = toggle_dsp_bypass()
+    elif current_dsp_venue == key:
+        print(f"\n   ℹ️ すでに {DSP_VENUE_LABELS.get(key, 'v' + key)} です")
+        return None
+    else:
+        _ok = switch_dsp_venue(key)
+    try:
+        import termios as _tm_v
+        _tm_v.tcflush(sys.stdin, _tm_v.TCIFLUSH)  # 切替中に溜まったキー入力を破棄
+    except Exception:
+        pass
+    if _ok:
+        _cur = current_dsp_venue or key
+        print(f"   🎛️ 現在の音場: {DSP_VENUE_LABELS.get(_cur, 'v' + str(_cur))}")
+    return _ok
 
 
 def _scan_dac_list():
@@ -3687,6 +4009,7 @@ def reinitialize_dsp_output():
 
     # ★★★ USB出力デジタルノイズ対策（オートサスペンド無効化+RT優先度付与） ★★★
     _usb_cnum = card_num_from_alsa_device(_dac_device)
+    _bi3._qji_usb_cnum = _usb_cnum  # ★ 状態表示・再付与用に記録
     if _usb_cnum is not None:
         _extra_pids = [_bi3._cdsp_proc.pid]
         if _bi3._wobble_proc is not None:
@@ -3963,7 +4286,7 @@ def _copy_from_station_menu(current_station) -> bool:
 
 def _reset_radio_preset() -> bool:
     """
-    [0]キー: ラジオ音場設定をシステムデフォルトに戻す。
+    [r]キー: ラジオ音場設定をシステムデフォルトに戻す。
     戻り値 True → 呼び出し側でストリームを再起動する。
     """
     print("\n")
@@ -4002,7 +4325,8 @@ def play_radio_stream(station):
       [x] SI音響プリセット選択（SI有効時のみ / 再起動）
       [s] 現在の音場設定をこの局に保存（SI EQデルタ含む / ストリーム継続）
       [l] 保存済み他局プリセット一覧→選択して適用（再起動）
-      [0] デフォルト設定にリセット（再起動）
+      [r] デフォルト設定にリセット（再起動）
+      [0] DSPバイパス(素通し)ON/OFF、[1]〜[6] DSP音場切替（DSPモード時のみ / ストリーム継続）
       [q] 停止してメインメニューへ
     """
     global stop_playback, current_processes
@@ -4224,9 +4548,9 @@ def play_radio_stream(station):
             print(f"\n✅ 接続成功！")
             print(f"🎵 再生中: {country} {name}")
             print(f"   🏛️  {_fp_now}  |  Air Particle: {_space_label}")
-            _ctrl_hint = ("[c]フィルター | [x]SIプリセット | [a]奏在 | [s]保存 | [l]他局コピー | [0]リセット | [q]停止"
+            _ctrl_hint = ("[c]フィルター | [x]SIプリセット | [a]奏在 | [0]バイパス/[1-6]音場 | [u/k/j/m]USB対策 | [s]保存 | [l]他局コピー | [r]リセット | [q]停止"
                           if SI_AVAILABLE else
-                          "[c]フィルター | [a]奏在 | [s]保存 | [l]他局コピー | [0]リセット | [q]停止")
+                          "[c]フィルター | [a]奏在 | [0]バイパス/[1-6]音場 | [u/k/j/m]USB対策 | [s]保存 | [l]他局コピー | [r]リセット | [q]停止")
             print(f"   {_ctrl_hint}")
             print("=" * 60)
 
@@ -4241,7 +4565,15 @@ def play_radio_stream(station):
                         print("\n⏹  停止します...")
                         break
 
-                    elif key in ('c', 'x', 'l', '0', 'a'):
+                    elif key in ('u', 'k', 'j', 'm', 'y'):
+                        # ★ USBノイズ対策の切替/状態表示（ストリームは止めない）
+                        _usb_guard_key_action(key)
+
+                    elif key in ('0', '1', '2', '3', '4', '5', '6'):
+                        # ★ [0]=DSPバイパス、[1]〜[6]=DSP音場をその場で切替（ストリームは止めない）
+                        _switch_dsp_venue_from_stream_key(key)
+
+                    elif key in ('c', 'x', 'l', 'r', 'a'):
                         # ── 再起動が必要なキー: ターミナル復元 → ストリーム停止 → 処理 ──
                         termios.tcsetattr(sys.stdin, termios.TCSANOW, old_settings)
                         old_settings = None
@@ -4281,7 +4613,7 @@ def play_radio_stream(station):
                             print("\n  ⚠️ Sonia Intelligence が無効です")
                         elif key == 'l':
                             restart_stream = _copy_from_station_menu(station)
-                        elif key == '0':
+                        elif key == 'r':
                             restart_stream = _reset_radio_preset()
                         elif key == 'a':
                             air_particle_layer = not air_particle_layer
@@ -4877,9 +5209,9 @@ def play_airplay_stream():
             print(f'\n📡 AirPlay レシーバー起動: 「{device_name}」')
             print(f'   ループバック: {loopback_play} → {loopback_cap} → {output_device} ({_fmt_label})')
             print(f'   🏛️  {_fp_label}  |  Air Particle: {_space_label}')
-            _hint = ('[c]フィルター|[x]SIプリセット|[a]奏在|[h]楽友協会|[i]画像|[+/-]音量|[q]停止'
+            _hint = ('[c]フィルター|[x]SIプリセット|[a]奏在|[h]楽友協会|[0]バイパス/[1-6]音場|[u/k/j/m]USB|[i]画像|[+/-]音量|[q]停止'
                      if SI_AVAILABLE else
-                     '[c]フィルター|[a]奏在|[h]楽友協会|[i]画像|[+/-]音量|[q]停止')
+                     '[c]フィルター|[a]奏在|[h]楽友協会|[0]バイパス/[1-6]音場|[u/k/j/m]USB|[i]画像|[+/-]音量|[q]停止')
             print(f'   {_hint}')
             print('=' * 60)
             print('⏳ iPhone / Mac で「Qji」を AirPlay 出力先に選択してください...')
@@ -4991,6 +5323,14 @@ def play_airplay_stream():
                                 print(f'\n🖼️ ジャケット画像再表示: {os.path.basename(_img)}')
                             else:
                                 print('\n⚠️ ジャケット画像が見つかりません')
+
+                        elif key in ('u', 'k', 'j', 'm', 'y'):
+                            # ★ USBノイズ対策の切替/状態表示（ストリームは止めない）
+                            _usb_guard_key_action(key)
+
+                        elif key in ('0', '1', '2', '3', '4', '5', '6'):
+                            # ★ [0]=DSPバイパス、[1]〜[6]=DSP音場をその場で切替（パイプラインは止めない）
+                            _switch_dsp_venue_from_stream_key(key)
 
                         elif key in ('c', 'x', 'a', 'h'):
                             termios.tcsetattr(sys.stdin, termios.TCSANOW, old_settings)
@@ -5493,9 +5833,9 @@ def play_gmediarender_stream():
             print(f'\n📡 UPnP/DLNA レシーバー起動: 「{device_name}」')
             print(f'   ループバック: {loopback_play} → {loopback_cap} → {output_device} ({_fmt_label})')
             print(f'   🏛️  {_fp_label}  |  音場: {_space_label}')
-            _hint = ('[c]フィルター|[x]SIプリセット|[a]奏在|[h]楽友協会|[+/-]音量|[q]停止'
+            _hint = ('[c]フィルター|[x]SIプリセット|[a]奏在|[h]楽友協会|[0]バイパス/[1-6]音場|[u/k/j/m]USB|[+/-]音量|[q]停止'
                      if SI_AVAILABLE else
-                     '[c]フィルター|[a]奏在|[h]楽友協会|[+/-]音量|[q]停止')
+                     '[c]フィルター|[a]奏在|[h]楽友協会|[0]バイパス/[1-6]音場|[u/k/j/m]USB|[+/-]音量|[q]停止')
             print(f'   {_hint}')
             print('=' * 60)
 
@@ -5597,6 +5937,14 @@ def play_gmediarender_stream():
                             CURRENT_VOLUME = max(CURRENT_VOLUME - 1, -20)
                             print(f'\n   🔊 出力ゲイン: {CURRENT_VOLUME:+d} dB')
                             _keep_gmrender = True; restart_stream = True; break
+
+                        elif key in ('u', 'k', 'j', 'm', 'y'):
+                            # ★ USBノイズ対策の切替/状態表示（ストリームは止めない）
+                            _usb_guard_key_action(key)
+
+                        elif key in ('0', '1', '2', '3', '4', '5', '6'):
+                            # ★ [0]=DSPバイパス、[1]〜[6]=DSP音場をその場で切替（パイプラインは止めない）
+                            _switch_dsp_venue_from_stream_key(key)
 
                         elif key in ('c', 'x', 'a', 'h'):
                             # ★ ターミナル操作・プロセス停止は finally に任せる。
@@ -10152,7 +10500,7 @@ def play_one_track(track, show_controls=True):
         terminal_print(f"   ムード: {color}{emoji} {mood_jp}{reset}")
     
     if show_controls:
-        terminal_print("🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態) | [q]終了してメニューへ")
+        terminal_print(f"🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [0]バイパス/[1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
         _gp_labels = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
         terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_labels.get(current_gain_preset, current_gain_preset)}) | [c]フィルター | [s]保存", end="")
         if SI_AVAILABLE:
@@ -11106,6 +11454,15 @@ def keyboard_listener():
         old_settings = None
     try:
         tty.setraw(sys.stdin.fileno())
+        # ★ setraw() also disables output post-processing (OPOST), so a plain print("\n") moves down
+        #   without a carriage return and text drifts into a staircase. Re-enable output processing
+        #   only (key input stays raw).
+        try:
+            _oa = termios.tcgetattr(sys.stdin)
+            _oa[1] |= (termios.OPOST | termios.ONLCR)
+            termios.tcsetattr(sys.stdin, termios.TCSANOW, _oa)
+        except Exception:
+            pass
         # ★★★ 修正: 起動時にstdinの残留バッファをフラッシュ（メニュー操作の残り入力を無視） ★★★
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
         # バッファに溜まっていた入力を読み捨てる（最大50文字）
@@ -11225,34 +11582,46 @@ def keyboard_listener():
                     terminal_print(f"\n🎚️  入力ゲインプリセット: {_gain_labels[current_gain_preset]}  ([g]で切替 / [s]で保存)")
                     replay_requested = True  # 現在曲に即反映
 
-                elif key in ('1', '2', '3', '4', '5', '6'):
+                elif key == 'u':
+                    # ★★★ [u] USB出力デジタルノイズ対策を両方まとめてON/OFF切り替え(A/B比較用) ★★★
+                    _new_state = toggle_usb_audio_output()
+                    if _new_state is True:
+                        terminal_print("\n🔌 USB出力ノイズ対策: ON（オートサスペンド無効化+RT優先度あり）")
+                    elif _new_state is False:
+                        terminal_print("\n🔌 USB出力ノイズ対策: OFF（比較用に通常状態へ戻しました）")
+                    terminal_print(f"🔌 現状: {_usb_guard_summary()}  (AS=オートサスペンド対策 / RT=リアルタイム優先度)")
+
+                elif key == 'k':
+                    # ★★★ [k] USBオートサスペンド対策のみON/OFF切り替え(原因切り分け用) ★★★
+                    _new_state = toggle_autosuspend_guard()
+                    if _new_state is True:
+                        terminal_print("\n🔌 USBオートサスペンド対策のみ: ON")
+                    elif _new_state is False:
+                        terminal_print("\n🔌 USBオートサスペンド対策のみ: OFF")
+                    terminal_print(f"🔌 現状: {_usb_guard_summary()}")
+
+                elif key == 'j':
+                    # ★★★ [j] リアルタイム優先度対策のみON/OFF切り替え(原因切り分け用) ★★★
+                    _new_state = toggle_rtprio_guard()
+                    if _new_state is True:
+                        terminal_print("\n🔌 リアルタイム優先度対策のみ: ON")
+                    elif _new_state is False:
+                        terminal_print("\n🔌 リアルタイム優先度対策のみ: OFF")
+                    terminal_print(f"🔌 現状: {_usb_guard_summary()}")
+
+                elif key in ('m', 'y'):
+                    # ★★★ [m] (alias: y) USBノイズ対策の現在の状態を表示（切替はしない） ★★★
+                    terminal_print(f"\n🔌 USBノイズ対策の現状: {_usb_guard_summary()}  (AS=オートサスペンド対策 / RT=リアルタイム優先度)")
+
+                elif key in ('0', '1', '2', '3', '4', '5', '6'):
                     # ★★★ [1]〜[6] DSPモードをその場で直接切り替え ★★★
                     if dsp_mode_active:
-                        if switch_dsp_venue(key):
+                        if (toggle_dsp_bypass() if key == '0' else switch_dsp_venue(key)):
                             # ★ 音声(ffmpeg→aplay)は止めずに、ジャケット画面のバッジだけ
                             #   新しいDSPモードに合わせて再描画する(曲の頭出しは発生しない)。
                             _redisplay_current_cover()
                     else:
                         terminal_print("\n⚠️ DSPモードで起動していないため音場切替はできません(起動時にLoopbackを選択してください)")
-
-                elif key == 'u':
-                    # ★★★ [u] USB出力デジタルノイズ対策を両方まとめてON/OFF切り替え(A/B比較用) ★★★
-                    toggle_usb_audio_output()
-                    terminal_print(format_guard_status())
-
-                elif key == 'k':
-                    # ★★★ [k] USBオートサスペンド対策のみON/OFF切り替え(原因切り分け用) ★★★
-                    toggle_autosuspend_guard()
-                    terminal_print(format_guard_status())
-
-                elif key == 'j':
-                    # ★★★ [j] リアルタイム優先度対策のみON/OFF切り替え(原因切り分け用) ★★★
-                    toggle_rtprio_guard()
-                    terminal_print(format_guard_status())
-
-                elif key == 'm':
-                    # ★★★ [m] USBノイズ対策の現在の状態を表示(実際のシステム状態を読み取る) ★★★
-                    terminal_print("\n" + format_guard_status())
 
                 elif key == 's':
                     # ★★★ [s] 現在の全音響設定をプロファイルとして保存 ★★★
@@ -11261,7 +11630,7 @@ def keyboard_listener():
                     # 画面クリア後にコントロール表示を再描画
                     try:
                         time.sleep(0.1)
-                        terminal_print("\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態) | [q]終了してメニューへ")
+                        terminal_print(f"\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [0]バイパス/[1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
                         _gp_l = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
                         terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_l.get(current_gain_preset, current_gain_preset)}) | [c]フィルター | [s]保存", end="")
                         if SI_AVAILABLE:
@@ -11272,7 +11641,7 @@ def keyboard_listener():
                         pass
                     # ── 画面クリア後にキーガイドを再表示 ──
                     time.sleep(0.1)
-                    terminal_print("\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態) | [q]終了してメニューへ")
+                    terminal_print(f"\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [0]バイパス/[1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
                     _fp = FILTER_PRESET_LABELS.get(current_filter_preset, current_filter_preset)
                     _gp_l2 = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
                     terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_l2.get(current_gain_preset, current_gain_preset)}) | [c]フィルター ({_fp}) | [s]保存", end="")
@@ -12047,9 +12416,9 @@ def select_output_device_interactive():
             chosen = devices[raw]
             output_device = chosen['hw']
             print(f"✅ 出力デバイス: {output_device}  ({chosen['name']})")
-            _usb_cnum = card_num_from_alsa_device(output_device)
-            if _usb_cnum is not None:
-                optimize_usb_audio_output(_usb_cnum)
+            _cnum = card_num_from_alsa_device(output_device)
+            if _cnum is not None:
+                optimize_usb_audio_output(_cnum)
             return output_device
         print("⚠️ 有効な番号を入力してください")
 
@@ -12057,9 +12426,9 @@ def select_output_device_interactive():
         print(f"✅ DSP標準出力カードとして hw:2,0 を自動選択しました")
     else:
         print(f"✅ デバイスを維持します: {output_device}")
-    _usb_cnum = card_num_from_alsa_device(output_device)
-    if _usb_cnum is not None:
-        optimize_usb_audio_output(_usb_cnum)
+    _cnum = card_num_from_alsa_device(output_device)
+    if _cnum is not None:
+        optimize_usb_audio_output(_cnum)
     return output_device
 
 
@@ -12172,6 +12541,39 @@ def show_splash_screen():
 # ★★★ スプラッシュスクリーンここまで ★★★
 
 
+def dsp_venue_menu():
+    """★ ホーム画面から DSP音場(v1〜v6)を切り替えるメニュー。
+    再生中の[1]〜[6]キーと同じ switch_dsp_venue() を使うため、
+    DACの選び直しは行わず「音場だけ」が変わる。
+    ラジオ/Qobuz等のストリーミング再生は、ここで選んだ音場がそのまま適用される。"""
+    global current_dsp_venue
+    if not dsp_mode_active:
+        print("⚠️ DSPモードが有効ではありません（起動時にDSPを選択していません）")
+        return
+    while True:
+        print("\n🎛️ DSP音場の切り替え")
+        print("=" * 60)
+        for _k in ('1', '2', '3', '4', '5', '6'):
+            _mark = "  ◀ 現在" if current_dsp_venue == _k else ""
+            print(f"  {_k}. {DSP_VENUE_LABELS.get(_k, 'v' + _k)}{_mark}")
+        print("  0. 戻る")
+        print("=" * 60)
+        _sel = input("\n音場を選択 (1-6, 0=戻る): ").strip()
+        if _sel in ('', '0', 'q'):
+            return
+        if _sel not in ('1', '2', '3', '4', '5', '6'):
+            print("⚠️ 無効な選択です")
+            continue
+        if _sel == current_dsp_venue:
+            print(f"ℹ️ すでに {DSP_VENUE_LABELS.get(_sel)} です")
+            continue
+        if switch_dsp_venue(_sel):
+            print(f"✅ 現在の音場: {DSP_VENUE_LABELS.get(_sel)}")
+        else:
+            print("❌ 切り替えに失敗しました（/tmp/camilladsp.log を確認してください）")
+        return
+
+
 def interactive_mode():
     """インタラクティブモード(ジャケット画像選曲対応)"""
     global output_device, current_playback_mode, current_audio_preset, current_gain_preset, loudness_normalization, tinnitus_reduction_mode, gapless_mode_enabled, upsampling_target_rate, musikverein_room_effects, air_particle_layer, CURRENT_VOLUME, musikverein_echo_mode, current_filter_preset
@@ -12240,13 +12642,15 @@ def interactive_mode():
         print("  Y. 🔴 YouTube Music ストリーミング")  # ★★★ 追加 ★★★
         print("  AP. 📡 AirPlay レシーバー（iPhone / Mac から受信）")  # ★★★ AirPlay ★★★
         print("  DL. 📻 UPnP/DLNA レシーバー（BubbleUPnP 等から受信）")  # ★★★ UPnP/DLNA ★★★
+        if dsp_mode_active:
+            print(f"  D. 🎛️ DSP音場の切り替え (v1〜v6): 現在 {DSP_VENUE_LABELS.get(current_dsp_venue, '-')}")
         print("  X. 🔄 DSP出力デバイスの再認識（後から接続したDACを掴み直す）")  # ★★★ 追加 ★★★
         print("  Q. 終了")
         print("=" * 60)
         print("💡 再生中に [q] を押すとこのメニューに戻ります")
 
         try:
-            choice = input("\n選択 (0-9, J, N, M, R, P, K, A, G, L, T, W, V, F, E, Z, U, QB, S, Y, AP, DL, X, Q): ").strip().lower()
+            choice = input("\n選択 (0-9, J, N, M, R, P, K, A, G, L, T, W, V, F, E, Z, U, QB, S, Y, AP, DL, D, X, Q): ").strip().lower()
 
             if choice == '0':
                 print("\n🎵 全曲ランダム再生モード")
@@ -13027,6 +13431,10 @@ def interactive_mode():
                     output_device=output_device,
                 )
 
+            elif choice == 'd':  # ★★★ DSP音場(v1〜v6)切替 ★★★
+                dsp_venue_menu()
+                continue
+
             elif choice == 'x':
                 reinitialize_dsp_output()
                 continue
@@ -13204,6 +13612,7 @@ if __name__ == "__main__":
 
                 # ★★★ USB出力デジタルノイズ対策（オートサスペンド無効化+RT優先度付与） ★★★
                 _usb_cnum = card_num_from_alsa_device(_dac_device)
+                _bi._qji_usb_cnum = _usb_cnum  # ★ 状態表示・再付与用に記録
                 if _usb_cnum is not None:
                     optimize_usb_audio_output(
                         _usb_cnum,
