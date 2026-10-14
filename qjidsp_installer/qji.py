@@ -37,6 +37,15 @@ import shutil
 import locale
 import unicodedata
 
+# ★★★ ローカル再生用ソフトウェアゲイン中継（aplay の直前で、音量を即時に調整する） ★★★
+try:
+    import numpy as np
+    GAIN_RELAY_AVAILABLE = True
+except ImportError:
+    GAIN_RELAY_AVAILABLE = False
+    print("⚠️  numpy が見つかりません。再生中のリアルタイム音量調整（[ / ] キー）は無効になります。")
+    print("    有効にするには: pip install numpy")
+
 # 音声認識のインポート
 try:
     from vosk import Model, KaldiRecognizer, SetLogLevel
@@ -241,6 +250,64 @@ PRESETS_FILE = os.path.expanduser('~/.music_player_presets.json')  # ★★★ �
 FAVORITES_FILE = os.path.expanduser('~/.music_player_favorites.json')  # ★★★ 追加: お気に入りファイル ★★★
 CURRENT_VOLUME = 12  # dB
 VOSK_MODEL_PATH = os.path.expanduser("~/vosk-model-ja-0.22")
+
+# ★★★ ギャップレス再生用: aplay の直前に置くソフトウェアゲイン中継 ★★★
+# CURRENT_VOLUME（既存の出力ゲイン。変更には ffmpeg の再起動が必要）とは独立した、
+# 「応急的な」減衰量（dB、0以下）です。曲を止めずに、即時に反映されます。
+# 新しいバッチが始まっても値は引き継がれます（曲のスキップや戻りも含む）。
+# 手動でリセットするまで、効いたままです。
+_LIVE_GAIN_MIN_DB = -30.0
+_LIVE_GAIN_MAX_DB = 0.0
+_live_gain_db = 0.0
+_live_gain_lock = threading.Lock()
+
+# ★★★ 音量調整機能そのもののオン/オフ（厳密なA/B試聴用） ★★★
+# OFF の間は、ffmpeg の出力が Python を通らず、カーネルレベルで aplay に直結されます
+# （元の qji.py とまったく同じ経路）。
+# ON の間は、0dB のときでも常に Python の中継スレッドを通るため、いつでも即座に調整が効きます。
+# ★ 既定は OFF です。使うときだけ [v] で明示的に有効にしてください。
+_live_gain_enabled = False
+_live_gain_enabled_lock = threading.Lock()
+
+
+def is_live_gain_enabled():
+    with _live_gain_enabled_lock:
+        return _live_gain_enabled
+
+
+def toggle_live_gain_enabled():
+    global _live_gain_enabled
+    with _live_gain_enabled_lock:
+        _live_gain_enabled = not _live_gain_enabled
+        return _live_gain_enabled
+
+
+def adjust_live_gain_db(delta_db):
+    """ギャップレス再生中のリアルタイム減衰量を増減し、結果の値(dB)を返す。"""
+    global _live_gain_db
+    with _live_gain_lock:
+        _live_gain_db = max(_LIVE_GAIN_MIN_DB,
+                                min(_LIVE_GAIN_MAX_DB, _live_gain_db + delta_db))
+        return _live_gain_db
+
+
+def get_live_gain_db():
+    with _live_gain_lock:
+        return _live_gain_db
+
+
+def set_live_gain_db(db):
+    """減衰量を絶対値で設定し（例: スライダーから）、結果の値(dB)を返す。"""
+    global _live_gain_db
+    with _live_gain_lock:
+        _live_gain_db = max(_LIVE_GAIN_MIN_DB, min(_LIVE_GAIN_MAX_DB, float(db)))
+        return _live_gain_db
+
+
+def _get_live_gain_linear():
+    with _live_gain_lock:
+        db = _live_gain_db
+    return 10.0 ** (db / 20.0)
 
 # グローバル状態
 current_playback_mode = 'tempo'
@@ -1088,6 +1155,31 @@ def get_now_playing_control_html():
     white-space: nowrap;
   }
   #toast.show { opacity: 1; }
+  #volume-box {
+    background: #14181f; border: 1px solid #2a3040; border-radius: 14px;
+    padding: 14px 16px;
+  }
+  #volume-row {
+    display: flex; align-items: center; gap: 12px;
+  }
+  #volume-icon { font-size: 1.3rem; flex-shrink: 0; }
+  #volume-value {
+    font-size: 0.85rem; color: #9ab; min-width: 52px; text-align: right;
+    flex-shrink: 0; font-variant-numeric: tabular-nums;
+  }
+  #volume-slider {
+    flex: 1; -webkit-appearance: none; appearance: none;
+    height: 8px; border-radius: 4px; background: #2a3040; outline: none;
+  }
+  #volume-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: #7eb8f7; cursor: pointer; border: 2px solid #0a0a0a;
+  }
+  #volume-slider::-moz-range-thumb {
+    width: 26px; height: 26px; border-radius: 50%;
+    background: #7eb8f7; cursor: pointer; border: 2px solid #0a0a0a;
+  }
 </style>
 </head>
 <body>
@@ -1103,6 +1195,13 @@ def get_now_playing_control_html():
 </div>
 
 <div id="controls">
+  <div id="volume-box">
+    <div id="volume-row">
+      <span id="volume-icon">🔊</span>
+      <input type="range" id="volume-slider" min="-30" max="0" step="1" value="0">
+      <span id="volume-value">0 dB</span>
+    </div>
+  </div>
   <button class="ctrl-btn" id="btn-next" onclick="sendCmd('next')">
     <span style="font-size:1.4rem">⏭</span> 次の曲へ
   </button>
@@ -1157,6 +1256,9 @@ def get_now_playing_control_html():
       document.getElementById('jacket').innerHTML = '<div class="no-image">🎵</div>';
       lastImageUrl = '';
     }
+    if (!draggingVolume && typeof data.gain_db === 'number') {
+      renderVolume(data.gain_db);
+    }
   }
 
   function showToast(msg) {
@@ -1165,6 +1267,39 @@ def get_now_playing_control_html():
     t.classList.add('show');
     setTimeout(() => t.classList.remove('show'), 2000);
   }
+
+  // ── 音量スライダー ──
+  let draggingVolume = false;
+  let volumeSendTimer = null;
+  const volSlider = document.getElementById('volume-slider');
+  const volValue = document.getElementById('volume-value');
+  const volIcon = document.getElementById('volume-icon');
+
+  function renderVolume(db) {
+    volSlider.value = db;
+    volValue.textContent = (db > 0 ? '+' : '') + db + ' dB';
+    volIcon.textContent = db <= -20 ? '🔈' : (db < 0 ? '🔉' : '🔊');
+  }
+
+  function sendVolume(db) {
+    fetch('/cmd', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'set_volume', value: db})
+    }).catch(() => showToast('⚠️  送信できませんでした'));
+  }
+
+  volSlider.addEventListener('input', function() {
+    draggingVolume = true;
+    const db = parseInt(volSlider.value, 10);
+    renderVolume(db);
+    clearTimeout(volumeSendTimer);
+    volumeSendTimer = setTimeout(() => sendVolume(db), 120);  // ドラッグ中は間引いて送信
+  });
+  volSlider.addEventListener('change', function() {
+    sendVolume(parseInt(volSlider.value, 10));
+    setTimeout(() => { draggingVolume = false; }, 300);
+  });
 
   function sendCmd(action) {
     const btn = document.getElementById(action === 'next' ? 'btn-next' : 'btn-stop');
@@ -1197,6 +1332,123 @@ def get_now_playing_control_html():
 </html>"""
 
 
+# ===== ★★★ 簡易アクセス制御（Now Playing ミラー / ジャケット選択サーバー） ★★★ =====
+import secrets as _secrets
+import hmac as _hmac
+import ipaddress as _ipaddress
+import html as _htmlmod
+import urllib.parse as _urlp
+
+NOW_PLAYING_REQUIRE_TOKEN = True      # False: no passcode (the old behaviour)
+NOW_PLAYING_ALLOW_PUBLIC_IP = False   # True: also accept connections from outside the home network
+_NP_SEC = {'token': _secrets.token_urlsafe(9)}
+_GALLERY_SEC = {'token': None, 'count': 0, 'folders': set()}
+_NP_SSE = {'n': 0, 'max': 16, 'lock': threading.Lock()}
+
+
+def _peer_is_local_network(addr):
+    """True if the peer is loopback / private / link-local / CGNAT(Tailscale etc.)"""
+    try:
+        ip = _ipaddress.ip_address(str(addr).split('%')[0])
+        if getattr(ip, 'ipv4_mapped', None):
+            ip = ip.ipv4_mapped
+        if ip.is_loopback or ip.is_private or ip.is_link_local:
+            return True
+        return ip.version == 4 and ip in _ipaddress.ip_network('100.64.0.0/10')
+    except Exception:
+        return False
+
+
+def _token_ok(given, expected):
+    try:
+        return bool(given) and bool(expected) and _hmac.compare_digest(str(given), str(expected))
+    except Exception:
+        return False
+
+
+def _np_sse_acquire():
+    with _NP_SSE['lock']:
+        if _NP_SSE['n'] >= _NP_SSE['max']:
+            return False
+        _NP_SSE['n'] += 1
+        return True
+
+
+def _np_sse_release():
+    with _NP_SSE['lock']:
+        _NP_SSE['n'] = max(0, _NP_SSE['n'] - 1)
+# '123456' のように6けたの数字を入れると、毎回同じ暗証番号になる(既定は、起動ごとにランダム)
+NOW_PLAYING_FIXED_PIN = None
+NP_LOGIN_MAX_FAILS_PER_IP = 5      # 同じ端末の失敗回数の上限(超えると、一定時間ロックする)
+NP_LOGIN_MAX_FAILS_GLOBAL = 30     # 全端末あわせた失敗回数の上限
+NP_LOGIN_WINDOW_SEC = 600          # 失敗を数える期間(秒)。ロックの長さも同じ
+_NP_LOGIN = {'lock': threading.Lock(), 'ip': {}, 'all': []}
+_NP_LOGIN_PAGES = ('/', '/index.html', '/control', '/control.html')
+
+
+def _np_new_pin():
+    """スマートフォンで入力しやすい、数字だけ6けたの暗証番号(長いランダム文字列は、入力が難しい)"""
+    if NOW_PLAYING_FIXED_PIN and str(NOW_PLAYING_FIXED_PIN).isdigit():
+        return str(NOW_PLAYING_FIXED_PIN)
+    return f"{_secrets.randbelow(10 ** 6):06d}"
+
+
+def _np_login_locked(addr):
+    now = time.time()
+    with _NP_LOGIN['lock']:
+        _NP_LOGIN['all'] = [t for t in _NP_LOGIN['all'] if now - t < NP_LOGIN_WINDOW_SEC]
+        if len(_NP_LOGIN['all']) >= NP_LOGIN_MAX_FAILS_GLOBAL:
+            return True
+        fails = [t for t in _NP_LOGIN['ip'].get(addr, []) if now - t < NP_LOGIN_WINDOW_SEC]
+        _NP_LOGIN['ip'][addr] = fails
+        return len(fails) >= NP_LOGIN_MAX_FAILS_PER_IP
+
+
+def _np_login_record(addr, success):
+    with _NP_LOGIN['lock']:
+        if success:
+            _NP_LOGIN['ip'].pop(addr, None)
+        else:
+            now = time.time()
+            _NP_LOGIN['ip'].setdefault(addr, []).append(now)
+            _NP_LOGIN['all'].append(now)
+
+
+def _np_login_html(next_path, message=''):
+    nxt = _htmlmod.escape(next_path if next_path in _NP_LOGIN_PAGES else '/', quote=True)
+    msg = ('<p class="err">' + _htmlmod.escape(message) + '</p>') if message else ''
+    return ('<!DOCTYPE html><html><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            '<title>QjiDSP リモコン</title><style>'
+            'body{background:#111;color:#eee;font-family:sans-serif;text-align:center;padding:12vh 16px}'
+            'input[name=pin]{font-size:2.2em;width:7em;text-align:center;letter-spacing:.25em;padding:.2em;'
+            'border-radius:10px;border:1px solid #666;background:#222;color:#fff}'
+            'button{font-size:1.3em;margin-top:1em;padding:.6em 2.4em;border-radius:10px;border:0;background:#2a6;color:#fff}'
+            '.err{color:#f88}p{color:#bbb}</style></head><body><h2>QjiDSP リモコン</h2>'
+            '<p>暗証番号(6けた)を入力してください。Qjiのターミナルに表示されています。</p>' + msg +
+            '<form method="POST" action="/login">'
+            '<input name="pin" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off" autofocus>'
+            '<input type="hidden" name="next" value="' + nxt + '"><br>'
+            '<button type="submit">開く</button></form></body></html>')
+
+
+def _np_print_qr(url):
+    """qrcode ライブラリがあれば、スマートフォンで読み取れる QR コードを表示する(なければ何もしない)"""
+    try:
+        import qrcode
+    except ImportError:
+        return
+    try:
+        print('   📷 QRコード(スマートフォンで読み取ると、暗証番号なしでそのままリモコンが開きます):')
+        qr = qrcode.QRCode(border=1)
+        qr.add_data(url)
+        qr.make(fit=True)
+        qr.print_ascii(invert=True)
+    except Exception:
+        pass
+# ===== ★★★ end of simple access control ★★★ =====
+
+
 def start_now_playing_server():
     """Now Playingミラーサーバーをバックグラウンドで起動"""
     global now_playing_server_running, now_playing_server_instance, now_playing_server_thread
@@ -1205,15 +1457,108 @@ def start_now_playing_server():
     import socketserver as _ss
 
     class NowPlayingHandler(SimpleHTTPRequestHandler):
+        timeout = 30  # 読み取りが止まったままの接続を、一定時間で切る
+
+        def setup(self):
+            super().setup()
+            try:  # detect clients that vanished (phone left the Wi-Fi, tab closed, etc.)
+                import socket as _sk
+                self.connection.setsockopt(_sk.SOL_SOCKET, _sk.SO_KEEPALIVE, 1)
+                for _o, _v in (('TCP_KEEPIDLE', 30), ('TCP_KEEPINTVL', 10), ('TCP_KEEPCNT', 3)):
+                    if hasattr(_sk, _o):
+                        self.connection.setsockopt(_sk.IPPROTO_TCP, getattr(_sk, _o), _v)
+            except Exception:
+                pass
+
+        def end_headers(self):
+            if getattr(self, '_set_np_cookie', False):
+                self.send_header('Set-Cookie', f"qji_np={_NP_SEC['token']}; Path=/; HttpOnly; SameSite=Strict")
+                self._set_np_cookie = False
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            super().end_headers()
+
+        def _guard(self, login_ok=False):
+            # ★ 事前検証: 接続元・Origin・合言葉を確認し、許可しない場合は応答を返して False を返す
+            def _deny(code, msg, ctype='text/plain; charset=utf-8'):
+                body = msg.encode('utf-8')
+                self.send_response(code)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return False
+            if not NOW_PLAYING_ALLOW_PUBLIC_IP and not _peer_is_local_network(self.client_address[0]):
+                return _deny(403, 'Forbidden')
+            origin = self.headers.get('Origin')
+            if origin and _urlp.urlparse(origin).netloc != (self.headers.get('Host') or ''):
+                return _deny(403, 'Forbidden (origin)')
+            if not NOW_PLAYING_REQUIRE_TOKEN:
+                return True
+            tok = _NP_SEC['token']
+            qs = _urlp.parse_qs(_urlp.urlparse(self.path).query)
+            if _token_ok((qs.get('k') or [''])[0], tok):
+                self._set_np_cookie = True
+                return True
+            for part in (self.headers.get('Cookie') or '').split(';'):
+                k, _, v = part.strip().partition('=')
+                if k == 'qji_np' and _token_ok(v, tok):
+                    return True
+            if login_ok:
+                return True
+            _p = _urlp.urlparse(self.path).path
+            if self.command in ('GET', 'HEAD') and _p in _NP_LOGIN_PAGES:
+                return _deny(401, _np_login_html(_p), 'text/html; charset=utf-8')
+            return _deny(403, 'このページを開くには、スマートフォンでトップページ(URLの末尾を除いた部分)を開き、Qjiのターミナルに表示された暗証番号を入力してください。')
+
+        def _handle_login(self):
+            """POST /login: check the PIN (with lockout after repeated failures) and hand out the session cookie."""
+            addr = self.client_address[0]
+            nxt = '/'
+            def _page(code, message=''):
+                body = _np_login_html(nxt, message).encode('utf-8')
+                self.send_response(code)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+            except ValueError:
+                length = -1
+            if length < 0 or length > 512:
+                self.send_response(413)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            form = _urlp.parse_qs(self.rfile.read(length).decode('utf-8', 'replace'))
+            cand = (form.get('next') or ['/'])[0]
+            nxt = cand if cand in _NP_LOGIN_PAGES else '/'
+            if _np_login_locked(addr):
+                return _page(429, '入力の失敗が続いたため、しばらく待ってからやり直してください。')
+            pin = ''.join(ch for ch in (form.get('pin') or [''])[0] if ch.isdigit())
+            if _token_ok(pin, _NP_SEC.get('pin')):
+                _np_login_record(addr, True)
+                self._set_np_cookie = True
+                self.send_response(303)
+                self.send_header('Location', nxt)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            _np_login_record(addr, False)
+            return _page(401, '暗証番号が違います。')
+
         def do_GET(self):
-            if self.path == '/' or self.path == '/index.html':
+            if not self._guard():
+                return
+            _p = _urlp.urlparse(self.path).path
+            if _p == '/' or _p == '/index.html':
                 html = get_now_playing_html().encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.send_header('Content-Length', str(len(html)))
                 self.end_headers()
                 self.wfile.write(html)
-            elif self.path == '/control' or self.path == '/control.html':
+            elif _p == '/control' or _p == '/control.html':
                 html = get_now_playing_control_html().encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -1247,27 +1592,30 @@ def start_now_playing_server():
                 from urllib.parse import urlparse, parse_qs, unquote as _unq
                 _parsed = urlparse(self.path)
                 _params = parse_qs(_parsed.query)
-                _title     = _unq(_params.get('title',     [''])[0])
-                _composer  = _unq(_params.get('composer',  [''])[0])
-                _performer = _unq(_params.get('performer', [''])[0])
-                _album     = _unq(_params.get('album',     [''])[0])
+                _title     = _unq(_params.get('title', [''])[0])[:200]
+                _composer  = _unq(_params.get('composer', [''])[0])[:200]
+                _performer = _unq(_params.get('performer', [''])[0])[:200]
+                _album     = _unq(_params.get('album', [''])[0])[:200]
                 _result    = _fetch_music_info(_title, _composer, _performer, _album)
                 _body = json.dumps(_result, ensure_ascii=False).encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json; charset=utf-8')
                 self.send_header('Content-Length', str(len(_body)))
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.send_header('Cache-Control', 'no-store')
                 self.end_headers()
                 self.wfile.write(_body)
-            elif self.path == '/events':
+            elif _p == '/events':
+                if not _np_sse_acquire():
+                    self.send_response(503)
+                    self.end_headers()
+                    return
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.send_header('Cache-Control', 'no-cache')
                 self.send_header('Connection', 'keep-alive')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 last_sent = {}
+                _last_write = time.time()
                 try:
                     while now_playing_server_running:
                         with info_display_lock:
@@ -1289,23 +1637,45 @@ def start_now_playing_server():
                             'preset':       current_filter_preset,
                             'preset_label': FILTER_PRESET_LABELS.get(
                                                 current_filter_preset, current_filter_preset),
+                            'gain_db':      get_live_gain_db(),
                         }
                         if payload != last_sent:
                             line = 'data: ' + json.dumps(payload, ensure_ascii=False) + '\n\n'
                             self.wfile.write(line.encode('utf-8'))
                             self.wfile.flush()
                             last_sent = payload
+                            _last_write = time.time()
+                        elif time.time() - _last_write >= 5.0:
+                            # heartbeat: lets the server notice a closed connection (EventSource ignores lines starting with ':')
+                            self.wfile.write(b': keepalive\n\n')
+                            self.wfile.flush()
+                            _last_write = time.time()
                         time.sleep(1.0)
                 except:
                     pass
+                finally:
+                    _np_sse_release()
             else:
                 self.send_response(404)
                 self.end_headers()
 
         def do_POST(self):
+            if _urlp.urlparse(self.path).path == '/login':
+                if self._guard(login_ok=True):
+                    self._handle_login()
+                return
+            if not self._guard():
+                return
             if self.path == '/cmd':
                 import json as _json
-                length = int(self.headers.get('Content-Length', 0))
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                except ValueError:
+                    length = -1
+                if length < 0 or length > 4096:
+                    self.send_response(413)
+                    self.end_headers()
+                    return
                 body = self.rfile.read(length)
                 try:
                     data = _json.loads(body)
@@ -1381,11 +1751,29 @@ def start_now_playing_server():
                                 except Exception: pass
                     msg = 'ok'
 
+                elif action == 'set_volume':
+                    _val = data.get('value', 0)
+                    try:
+                        import math as _math
+                        _f = float(_val)
+                        if not _math.isfinite(_f):
+                            raise ValueError('non-finite')
+                        _new_db = set_live_gain_db(_f)
+                        msg = 'ok'
+                    except Exception:
+                        msg = 'error'
+                    resp = _json.dumps({'result': msg, 'gain_db': get_live_gain_db()}).encode('utf-8')
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json; charset=utf-8')
+                    self.send_header('Content-Length', str(len(resp)))
+                    self.end_headers()
+                    self.wfile.write(resp)
+                    return
+
                 resp = _json.dumps({'result': msg}).encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json; charset=utf-8')
                 self.send_header('Content-Length', str(len(resp)))
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(resp)
             else:
@@ -1398,6 +1786,7 @@ def start_now_playing_server():
     def run_server():
         global now_playing_server_instance
         _ss.ThreadingTCPServer.allow_reuse_address = True
+        _ss.ThreadingTCPServer.daemon_threads = True
         try:
             with _ss.ThreadingTCPServer(('', NOW_PLAYING_PORT), NowPlayingHandler) as httpd:
                 now_playing_server_instance = httpd
@@ -1411,9 +1800,15 @@ def start_now_playing_server():
     now_playing_server_thread = threading.Thread(target=run_server, daemon=True)
     now_playing_server_thread.start()
     ip = get_local_ip()
+    _NP_SEC['token'] = _secrets.token_urlsafe(9)  # this session's passcode
+    _NP_SEC['pin'] = _np_new_pin()  # 6-digit PIN for phones
+    _np_q = ''  # the URLs stay short and plain: phones sign in with the PIN (or the QR code)
     print(f"\n📱 Now Playingミラー起動中!")
-    print(f"   🖼  ジャケット表示  → http://{ip}:{NOW_PLAYING_PORT}/")
-    print(f"   🎛  再生コントロール → http://{ip}:{NOW_PLAYING_PORT}/control")
+    print(f"   🖼  ジャケット表示  → http://{ip}:{NOW_PLAYING_PORT}/{_np_q}")
+    print(f"   🎛  再生コントロール → http://{ip}:{NOW_PLAYING_PORT}/control{_np_q}")
+    if NOW_PLAYING_REQUIRE_TOKEN:
+        print(f"   🔐 暗証番号(PIN): {_NP_SEC['pin']}   ← スマートフォンで上のURLを開いたら、これを入力してください")
+        _np_print_qr(f"http://{ip}:{NOW_PLAYING_PORT}/control?k={_NP_SEC['token']}")
     print(f"   （同じWi-Fiに接続されていれば表示されます）\n")
 
 def stop_now_playing_server():
@@ -4440,6 +4835,7 @@ def play_radio_stream(station):
                 #   区切ってくることがあり、これが「一瞬無音→即再生再開」の主因になる。
                 '-reconnect_at_eof', '1',
                 '-timeout', '15000000',
+                '-protocol_whitelist', 'http,https,tcp,tls,crypto',
                 '-i', url,
                 '-vn',
                 '-ar', output_sample_rate,
@@ -7285,10 +7681,10 @@ def display_album_covers_with_feh(album_covers, keep_browser_open=False, existin
         except:
             pass
     if not os.path.exists(temp_dir):
-        os.makedirs(temp_dir, mode=0o755)
+        os.makedirs(temp_dir, mode=0o700)
     
     try:
-        os.chmod(temp_dir, 0o755)
+        os.chmod(temp_dir, 0o700)
     except:
         pass
     
@@ -7318,6 +7714,10 @@ def display_album_covers_with_feh(album_covers, keep_browser_open=False, existin
             image_files.append((i, new_name, os.path.basename(folder), track_count, folder))
         
         # HTMLギャラリーを生成
+        if _GALLERY_SEC['token'] is None:
+            _GALLERY_SEC['token'] = _secrets.token_urlsafe(12)
+        _GALLERY_SEC['count'] = len(album_covers)
+        _GALLERY_SEC['folders'] = set(os.path.realpath(_f) for (_ip, _f, _tc) in album_covers)
         html_content = """<!DOCTYPE html>
 <html>
 <head>
@@ -7544,10 +7944,10 @@ def display_album_covers_with_feh(album_covers, keep_browser_open=False, existin
         for i, filename, folder_name, track_count, folder_path in image_files:
             cache_buster = f"?v={timestamp}"
             # フォルダーパスをエスケープしてdata属性に追加
-            escaped_folder = folder_path.replace("'", "\\'")
+            escaped_folder = _htmlmod.escape(folder_path, quote=True)
             html_content += f"""
-        <div class="album" id="album-{i}" onclick="selectAlbum({i}, this)" data-folder="{escaped_folder}" data-name="{folder_name[:40]}">
-            <img src="{filename}{cache_buster}" alt="アルバム {i}">
+        <div class="album" id="album-{i}" onclick="selectAlbum({i}, this)" data-folder="{escaped_folder}" data-name="{_htmlmod.escape(folder_name[:40], quote=True)}">
+            <img src="{_htmlmod.escape(filename, quote=True)}{cache_buster}" alt="アルバム {i}">
             <div class="album-number">{i}</div>
             <div class="album-info">{track_count} トラック</div>
             <div class="played-mark">✓</div>
@@ -7567,12 +7967,19 @@ def display_album_covers_with_feh(album_covers, keep_browser_open=False, existin
                 el.innerHTML = '<div class="queue-empty">クリックで追加</div>';
                 return;
             }
-            el.innerHTML = queueList.map((item, idx) =>
-                `<div class="queue-item">
-                    <span class="queue-pos">${idx + 1}</span>
-                    <span>${item.name || ('アルバム ' + item.num)}</span>
-                </div>`
-            ).join('');
+            el.innerHTML = '';
+            queueList.forEach(function(item, idx) {
+                const row = document.createElement('div');
+                row.className = 'queue-item';
+                const pos = document.createElement('span');
+                pos.className = 'queue-pos';
+                pos.textContent = String(idx + 1);
+                const nm = document.createElement('span');
+                nm.textContent = item.name || ('アルバム ' + item.num);
+                row.appendChild(pos);
+                row.appendChild(nm);
+                el.appendChild(row);
+            });
         }
         
         function clearQueue() {
@@ -7604,7 +8011,7 @@ def display_album_covers_with_feh(album_covers, keep_browser_open=False, existin
             localStorage.setItem('selected_album', number);
             
             // サーバーに送信
-            fetch('select.php?num=' + number, {method: 'POST'})
+            fetch('select.php?num=' + number + '&t=__QJI_TOKEN__', {method: 'POST'})
                 .catch(function() {});
             
             setTimeout(function() {
@@ -7634,7 +8041,7 @@ def display_album_covers_with_feh(album_covers, keep_browser_open=False, existin
         // フォルダーを開く
         function openFolder() {
             if (currentContextFolder) {
-                fetch('open_folder.php?path=' + encodeURIComponent(currentContextFolder), {method: 'POST'})
+                fetch('open_folder.php?path=' + encodeURIComponent(currentContextFolder) + '&t=__QJI_TOKEN__', {method: 'POST'})
                     .then(response => {
                         document.getElementById('status').textContent = 'フォルダーを開きました';
                         document.getElementById('status').classList.add('show');
@@ -7664,12 +8071,13 @@ def display_album_covers_with_feh(album_covers, keep_browser_open=False, existin
 </html>
 """
         
+        html_content = html_content.replace('__QJI_TOKEN__', _GALLERY_SEC['token'])
         html_file = os.path.join(temp_dir, 'gallery.html')
         with open(html_file, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
         try:
-            os.chmod(html_file, 0o644)
+            os.chmod(html_file, 0o600)
         except:
             pass
         
@@ -7679,14 +8087,54 @@ def display_album_covers_with_feh(album_covers, keep_browser_open=False, existin
         # 既存のサーバーがあればそれを使用
         if existing_server is None:
             class SelectionHandler(SimpleHTTPRequestHandler):
+                timeout = 10  # 読み取りが止まったままの接続を、一定時間で切る
+
+                def _host_ok(self):
+                    host = (self.headers.get('Host') or '').strip().lower()
+                    port = self.server.server_address[1]
+                    return host in (f'127.0.0.1:{port}', f'localhost:{port}', f'[::1]:{port}')
+
+                def _deny(self, code=403):
+                    try:
+                        self.send_response(code)
+                        self.send_header('Content-Length', '0')
+                        self.end_headers()
+                    except Exception:
+                        pass
+
+                def list_directory(self, path):
+                    self.send_error(404, 'Not Found')
+                    return None
+
+                def do_GET(self):
+                    if not self._host_ok():
+                        return self._deny(403)
+                    super().do_GET()
+
+                def do_HEAD(self):
+                    if not self._host_ok():
+                        return self._deny(403)
+                    super().do_HEAD()
+
                 def do_POST(self):
                     global web_selection_result, next_album_selection
+                    if not self._host_ok():
+                        return self._deny(403)
+                    import urllib.parse as _upm
+                    _qq = _upm.parse_qs(_upm.urlparse(self.path).query)
+                    if not _token_ok((_qq.get('t') or [''])[0], _GALLERY_SEC['token']):
+                        return self._deny(403)
                     if 'select.php' in self.path:
                         import urllib.parse
                         query = urllib.parse.urlparse(self.path).query
                         params = urllib.parse.parse_qs(query)
                         if 'num' in params:
-                            num = int(params['num'][0])
+                            try:
+                                num = int(params['num'][0])
+                            except ValueError:
+                                return self._deny(400)
+                            if not (1 <= num <= _GALLERY_SEC['count']) or len(next_album_selection) >= 500:
+                                return self._deny(400)
                             next_album_selection.append(num)
                             web_selection_result = num  # 互換性のため残す
                             q_len = len(next_album_selection)
@@ -7699,6 +8147,8 @@ def display_album_covers_with_feh(album_covers, keep_browser_open=False, existin
                         params = urllib.parse.parse_qs(query)
                         if 'path' in params:
                             folder_path = params['path'][0]
+                            if os.path.realpath(folder_path) not in _GALLERY_SEC['folders']:
+                                return self._deny(403)
                             print(f"\n📁 フォルダーを開きます: {folder_path}")
                             try:
                                 # ファイルマネージャーでフォルダーを開く
@@ -7732,7 +8182,7 @@ def display_album_covers_with_feh(album_covers, keep_browser_open=False, existin
                 # ★★★ SO_REUSEADDRオプションを追加 ★★★
                 socketserver.TCPServer.allow_reuse_address = True
                 try:
-                    with socketserver.TCPServer(("", server_port), SelectionHandler) as httpd:
+                    with socketserver.TCPServer(("127.0.0.1", server_port), SelectionHandler) as httpd:
                         web_server_instance = httpd
                         httpd.timeout = 1
                         while web_server_running:
@@ -7756,7 +8206,7 @@ def display_album_covers_with_feh(album_covers, keep_browser_open=False, existin
             print(f"  {i:3d}. {folder_name[:60]:60} ({track_count} トラック)")
         
         print("\n" + "=" * 60)
-        print(f"💡 ブラウザで開くURL: http://localhost:{server_port}/gallery.html")
+        print(f"💡 ブラウザで開くURL: http://127.0.0.1:{server_port}/gallery.html")
         print("=" * 60)
         print("🎵 操作方法:")
         print("   1. 上記のURLをブラウザで開く")
@@ -7765,7 +8215,7 @@ def display_album_covers_with_feh(album_covers, keep_browser_open=False, existin
         print("   4. 終了する場合は 'q' または 'back' を入力")
         print("=" * 60)
         
-        browser_url = f"http://localhost:{server_port}/gallery.html"
+        browser_url = f"http://127.0.0.1:{server_port}/gallery.html"
         browser_process = None
         
         profile_dir = os.path.expanduser('~/music_player_chrome_profile')
@@ -10500,7 +10950,7 @@ def play_one_track(track, show_controls=True):
         terminal_print(f"   ムード: {color}{emoji} {mood_jp}{reset}")
     
     if show_controls:
-        terminal_print(f"🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [0]バイパス/[1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
+        terminal_print(f"🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [ と ] 音量 | [v]音量調整ON/OFF | [0]バイパス/[1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
         _gp_labels = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
         terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_labels.get(current_gain_preset, current_gain_preset)}) | [c]フィルター | [s]保存", end="")
         if SI_AVAILABLE:
@@ -10701,16 +11151,32 @@ def play_one_track(track, show_controls=True):
              '-ar', str(output_sample_rate),  # ★★★ サンプリングレートを明示的に指定 ★★★
              '-acodec', 'pcm_s32le']
             + filter_args
-            + ['-f', 'wav', '-']
+            + ['-f', 's32le', '-']  # ★ WAVコンテナから生PCMに変更（ゲイン中継で、ヘッダーの解析が不要になる）
         )
 
         # ★★★ aplayコマンドにもサンプリングレートを明示的に指定 ★★★
         aplay_cmd = [
             'aplay', 
             '-D', output_device, 
-            '-r', '48000' if dsp_mode_active else str(original_sample_rate),  # ★★★
+            '-f', 'S32_LE', '-c', '2', '-t', 'raw',  # ★ 生PCMであることを明示（ヘッダーなし）
+            '-r', str(output_sample_rate),  # ★ ffmpeg の出力レートと必ず一致させる（生PCMにはヘッダーがない。アップサンプリング時も正しく再生される）
             '--buffer-size=262144', 
             '--period-size=32768'
+        ]
+
+        # ★★★ 音量調整の応答性を上げる: ゲイン中継が有効なときだけ使う、小さいバッファ版 ★★★
+        # 通常の --buffer-size=262144（48kHzで約5.5秒）は、音切れを避けるために必要ですが、
+        # ゲイン中継がONの間は、そのALSAリングバッファが「古い音量で処理済みの音」を数秒分抱えます。
+        # これが、[ / ] キーやスマートフォンのスライダーが効くまでに、約7秒かかる主な原因です。
+        # 中継が有効な間だけ、バッファを約4分の1に縮めて応答性を優先します
+        # （直結パイプ側 = 元の qji.py と同じ経路は、安定性優先のバッファのままです）。
+        aplay_cmd_live = [
+            'aplay', 
+            '-D', output_device, 
+            '-f', 'S32_LE', '-c', '2', '-t', 'raw',
+            '-r', str(output_sample_rate),  # ★ ffmpeg の出力レートと必ず一致させる（生PCMにはヘッダーがない。アップサンプリング時も正しく再生される）
+            '--buffer-size=65536',   # ★ 48kHzで約1.4秒
+            '--period-size=8192'
         ]
 
         # ★★★ 診断用: Vinyl Emotion再生中に限り、ffmpeg/aplayのstderrを
@@ -10735,12 +11201,26 @@ def play_one_track(track, show_controls=True):
         # adelay で起動ラグを吸収するため、ffmpeg→aplay 間の待機は最小限に短縮
         time.sleep(0.05)
 
-        current_processes['aplay'] = subprocess.Popen(
-            aplay_cmd,
-            stdin=current_processes['ffmpeg'].stdout,
-            stderr=_aplay_stderr
-        )
-        current_processes['ffmpeg'].stdout.close()
+        _gain_relay_stop = threading.Event()
+        if GAIN_RELAY_AVAILABLE and is_live_gain_enabled():
+            # ★ aplay の直前にソフトウェアゲイン中継を挟む（通常/ランダム再生中も、[ / ] キーで音量を即時に調整できる）
+            current_processes['aplay'] = subprocess.Popen(
+                aplay_cmd_live,
+                stdin=subprocess.PIPE,
+                stderr=_aplay_stderr
+            )
+            threading.Thread(
+                target=_gain_relay_thread,
+                args=(current_processes['ffmpeg'].stdout, current_processes['aplay'].stdin, _gain_relay_stop),
+                daemon=True
+            ).start()
+        else:
+            current_processes['aplay'] = subprocess.Popen(
+                aplay_cmd,
+                stdin=current_processes['ffmpeg'].stdout,
+                stderr=_aplay_stderr
+            )
+            current_processes['ffmpeg'].stdout.close()
 
         # パイプライン安定化 (adelayが吸収するため短縮)
         time.sleep(0.05)
@@ -11567,6 +12047,33 @@ def keyboard_listener():
                     terminal_print(f"\n🔉 出力ゲイン: {CURRENT_VOLUME:+d} dB（[+]上げる / [-]下げる）")
                     replay_requested = True  # 現在曲に即反映
 
+                elif key == ']':
+                    # ★★★ [ ] ] 音量をその場で即時に調整（+1dB、曲を止めずに反映） ★★★
+                    if is_live_gain_enabled():
+                        _new_db = adjust_live_gain_db(+1.0)
+                        terminal_print(f"\n🔊 リアルタイム音量調整: {_new_db:+.0f} dB  (] 上げる / [ 下げる)")
+                    else:
+                        terminal_print("\n⏸  音量調整はOFFです（[v] で有効にします）")
+
+                elif key == '[':
+                    # ★★★ [ [ ] 音量をその場で即時に調整（-1dB、曲を止めずに反映） ★★★
+                    if is_live_gain_enabled():
+                        _new_db = adjust_live_gain_db(-1.0)
+                        terminal_print(f"\n🔉 リアルタイム音量調整: {_new_db:+.0f} dB  (] 上げる / [ 下げる)")
+                    else:
+                        terminal_print("\n⏸  音量調整はOFFです（[v] で有効にします）")
+
+                elif key == 'v':
+                    # ★★★ [v] 音量調整機能そのもののON/OFF（厳密なA/B試聴用） ★★★
+                    # ★ 現在の曲にも今すぐ反映するため、replay_requested を立てて、曲を読み込み直す
+                    #   （中継スレッド経由か、直結パイプかの切り替えが、すぐに効く）
+                    _enabled = toggle_live_gain_enabled()
+                    replay_requested = True
+                    if _enabled:
+                        terminal_print(f"\n🔊 音量調整: ON（中継スレッドに切り替え、現在の曲に今すぐ反映します。]/[ で調整）")
+                    else:
+                        terminal_print(f"\n⏸  音量調整: OFF（直結パイプに戻し、現在の曲に今すぐ反映します — 元の qji.py と同じ経路）")
+
                 elif key == 'g':
                     # ★★★ [g] 入力ゲインプリセット循環 ★★★
                     _gain_order = ['classical', 'general', 'jazz_pop', 'loud']
@@ -11630,7 +12137,7 @@ def keyboard_listener():
                     # 画面クリア後にコントロール表示を再描画
                     try:
                         time.sleep(0.1)
-                        terminal_print(f"\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [0]バイパス/[1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
+                        terminal_print(f"\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [ と ] 音量 | [v]音量調整ON/OFF | [0]バイパス/[1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
                         _gp_l = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
                         terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_l.get(current_gain_preset, current_gain_preset)}) | [c]フィルター | [s]保存", end="")
                         if SI_AVAILABLE:
@@ -11641,7 +12148,7 @@ def keyboard_listener():
                         pass
                     # ── 画面クリア後にキーガイドを再表示 ──
                     time.sleep(0.1)
-                    terminal_print(f"\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [0]バイパス/[1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
+                    terminal_print(f"\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [ と ] 音量 | [v]音量調整ON/OFF | [0]バイパス/[1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
                     _fp = FILTER_PRESET_LABELS.get(current_filter_preset, current_filter_preset)
                     _gp_l2 = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
                     terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_l2.get(current_gain_preset, current_gain_preset)}) | [c]フィルター ({_fp}) | [s]保存", end="")
@@ -11782,6 +12289,59 @@ def voice_listener():
 
 # ===== ギャップレス再生機能 =====
 
+def _gain_relay_thread(src_fh, dst_fh, stop_event, bytes_per_sample=4, channels=2):
+    """
+    ffmpeg の stdout（ヘッダーなしの生PCM）を読み取り、aplay の stdin に中継する。
+    途中でソフトウェアゲイン（_live_gain_db、減衰のみ）を適用する。
+
+    - 音質を損なわないために: (1) 減衰のみ（0dB〜-30dB）で、増幅はしない（クリップしない）、
+      (2) numpy でベクトル化して処理する（サンプルごとの Python ループは使わない）、
+      (3) 整数に戻す前に丸める（切り捨て誤差による偏りを避ける）。
+    - ヘッダーのない生PCM（S32_LE）を前提にするので、解析は不要。
+    """
+    try:
+        frame_bytes = bytes_per_sample * max(channels, 1)
+        # ★ 応答性のため、小さめのチャンクを使う（numpy のベクトル化で CPU 負荷は軽い）
+        # ★ 応答性とオーバーヘッド（システムコールの頻度）のトレードオフ値
+        read_size = 32768 - (32768 % frame_bytes) if frame_bytes else 32768
+        dtype = {1: np.int8, 2: np.int16, 4: np.int32}.get(bytes_per_sample, np.int32)
+        int_min = np.iinfo(dtype).min
+        int_max = np.iinfo(dtype).max
+        leftover = b''
+
+        while not stop_event.is_set():
+            raw = src_fh.read(read_size)
+            if not raw:
+                break
+            data = leftover + raw
+            usable_len = len(data) - (len(data) % frame_bytes)
+            if usable_len <= 0:
+                leftover = data
+                continue
+            leftover = data[usable_len:]
+            block = data[:usable_len]
+
+            gain = _get_live_gain_linear()
+            if gain >= 0.999999:
+                # 0dB（減衰なし）の間は、計算せずそのまま通す
+                dst_fh.write(block)
+            else:
+                samples = np.frombuffer(block, dtype=dtype)
+                scaled = np.round(samples.astype(np.float64) * gain)
+                scaled = np.clip(scaled, int_min, int_max).astype(dtype)
+                dst_fh.write(scaled.tobytes())
+            dst_fh.flush()
+    except (BrokenPipeError, ValueError, OSError):
+        pass
+    except Exception:
+        pass
+    finally:
+        try:
+            dst_fh.close()
+        except Exception:
+            pass
+
+
 def create_concat_file_for_gapless(tracks, temp_dir):
     """
     FFmpegのconcatデマルチプレクサ用のファイルリストを作成
@@ -11859,7 +12419,7 @@ def play_tracks_gapless(tracks, start_index=0):
             output_sample_rate = upsampling_target_rate
             pass  # サンプリングレート情報（情報バーに表示済み）
         else:
-            output_sample_rate = original_sample_rate
+            output_sample_rate = 48000 if dsp_mode_active else original_sample_rate  # ★ 生PCMはヘッダーがないため、DSPモードでは aplay の -r 48000 と一致させる
             pass  # サンプリングレート情報
         
         # FFmpegコマンドを構築
@@ -11925,17 +12485,34 @@ def play_tracks_gapless(tracks, start_index=0):
         ffmpeg_cmd.extend(
             ['-vn', '-ar', str(output_sample_rate), '-acodec', 'pcm_s32le']
             + filter_args
-            + ['-f', 'wav', '-']
+            + ['-f', 's32le', '-']  # ★ WAVコンテナから生PCMに変更（ゲイン中継で、ヘッダーの解析が不要になる）
         )
         
         # ★★★ aplayコマンドにもサンプリングレートとバッファサイズを指定 ★★★
         aplay_cmd = [
             'aplay', 
             '-D', output_device, 
-            '-r', '48000' if dsp_mode_active else str(original_sample_rate),
+            '-f', 'S32_LE', '-c', '2', '-t', 'raw',  # ★ 生PCMであることを明示（ヘッダーなし）
+            '-r', str(output_sample_rate),  # ★ ffmpeg の出力レートと必ず一致させる（生PCMにはヘッダーがない。アップサンプリング時も正しく再生される）
             '--buffer-size=262144', 
             '--period-size=32768'
         ]
+
+        # ★★★ 音量調整の応答性を上げる（play_one_track と同じ理由）: ゲイン中継が有効なときだけ使う、小さいバッファ版 ★★★
+        # 通常の --buffer-size=262144（48kHzで約5.5秒）は、音切れを避けるために必要ですが、
+        # ゲイン中継がONの間は、そのALSAリングバッファが「古い音量で処理済みの音」を数秒分抱えます。
+        # これが、[ / ] キーやスマートフォンのスライダーが効くまでに、約7秒かかる主な原因です。
+        # 中継が有効な間だけ、バッファを約4分の1に縮めて応答性を優先します
+        # （直結パイプ側 = 元の qji.py と同じ経路は、安定性優先のバッファのままです）。
+        aplay_cmd_live = [
+            'aplay', 
+            '-D', output_device, 
+            '-f', 'S32_LE', '-c', '2', '-t', 'raw',
+            '-r', str(output_sample_rate),  # ★ ffmpeg の出力レートと必ず一致させる（生PCMにはヘッダーがない。アップサンプリング時も正しく再生される）
+            '--buffer-size=65536',   # ★ 48kHzで約1.4秒
+            '--period-size=8192'
+        ]
+        
         
         print(f"\n🎵 ギャップレス再生モード: {len(batch_tracks)}曲を連続再生")
         print("=" * 60)
@@ -11953,14 +12530,29 @@ def play_tracks_gapless(tracks, start_index=0):
             stderr=subprocess.DEVNULL
         )
         
-        aplay_proc = subprocess.Popen(
-            aplay_cmd,
-            stdin=ffmpeg_proc.stdout,
-            stderr=subprocess.DEVNULL
-        )
-        # ★ 親プロセスのstdout参照を閉じる（パイプ衛生）
-        # これをしないとaplayが死んでもffmpegのパイプバッファが詰まりハングする
-        ffmpeg_proc.stdout.close()
+        _gain_relay_stop = threading.Event()
+        if GAIN_RELAY_AVAILABLE and is_live_gain_enabled():
+            # ★ aplay の直前にソフトウェアゲイン中継を挟む（音量をその場で調整できる）
+            aplay_proc = subprocess.Popen(
+                aplay_cmd_live,
+                stdin=subprocess.PIPE,
+                stderr=subprocess.DEVNULL
+            )
+            threading.Thread(
+                target=_gain_relay_thread,
+                args=(ffmpeg_proc.stdout, aplay_proc.stdin, _gain_relay_stop),
+                daemon=True
+            ).start()
+        else:
+            # numpy未導入時は従来通り直結（リアルタイム音量調整キーは効かない）
+            aplay_proc = subprocess.Popen(
+                aplay_cmd,
+                stdin=ffmpeg_proc.stdout,
+                stderr=subprocess.DEVNULL
+            )
+            # ★ 親プロセスのstdout参照を閉じる（パイプ衛生）
+            # これをしないとaplayが死んでもffmpegのパイプバッファが詰まりハングする
+            ffmpeg_proc.stdout.close()
 
         current_processes['ffmpeg'] = ffmpeg_proc
         current_processes['aplay'] = aplay_proc
@@ -11993,6 +12585,7 @@ def play_tracks_gapless(tracks, start_index=0):
             
             # ユーザー操作チェック
             if stop_playback:
+                _gain_relay_stop.set()
                 ffmpeg_proc.terminate()
                 aplay_proc.terminate()
                 return gapless_current_index
@@ -12000,6 +12593,7 @@ def play_tracks_gapless(tracks, start_index=0):
             if next_track_requested:
                 # スキップ機能は実装が複雑なため、現在は全体を停止
                 next_track_requested = False
+                _gain_relay_stop.set()
                 ffmpeg_proc.terminate()
                 aplay_proc.terminate()
                 return min(gapless_current_index + 1, len(tracks) - 1)
@@ -12007,6 +12601,7 @@ def play_tracks_gapless(tracks, start_index=0):
             if prev_track_requested:
                 # 前の曲へ戻る(全体を停止して再開始)
                 prev_track_requested = False
+                _gain_relay_stop.set()
                 ffmpeg_proc.terminate()
                 aplay_proc.terminate()
                 return max(0, gapless_current_index - 1)
