@@ -87,9 +87,9 @@ bash install_qjidsp.sh
 インストーラーは以下を行います。
 
 - 必要パッケージ（ffmpeg, alsa-utils, git 等）のインストール
-- Python ライブラリ（soundfile, scipy, pycamilladsp）と `yt-dlp` の更新
+- Python ライブラリ（soundfile, scipy, pycamilladsp）と `yt-dlp[default]` の更新（YouTube 再生に必要な部品 `yt-dlp-ejs` を含みます。古い `yt-dlp` が優先されて残っている場合は、自動で検出して `sudo` で更新します）
 - CamillaDSP 本体のダウンロード
-- `deno`（YouTube Music 再生の安定化に使用）のインストール
+- `deno`（YouTube の署名解読に使用。**2.3 以上が必要**）のインストール
 - 仮想サウンドカード（`snd-aloop`）の有効化
 - `~/qji/` へ本体一式・DSP設定ファイル（音場 v1〜v6）・IR（残響）ファイルを配置
 
@@ -140,10 +140,19 @@ Qji Peak Monitorのアップデート確認と同じ方式です。
 「いいね」した曲やライブラリへアクセスする場合のみ、ブラウザ認証を設定してください。
 
 ```bash
-python3 -c "from ytmusicapi import YTMusic; YTMusic.setup(filepath='~/.config/qji_ytmusic_auth.json')"
+mkdir -p ~/.config
+python3 -c "import os, ytmusicapi; ytmusicapi.setup(filepath=os.path.expanduser('~/.config/qji_ytmusic_auth.json'))"
 ```
 
+実行すると、ブラウザ（Chrome / Firefox）で music.youtube.com にログインした状態でコピーした「リクエストヘッダー」の貼り付けを求められます。貼り付けたあと `Ctrl-D` で確定してください。
+
 未設定でも `yt-dlp` 検索で再生自体は可能です。
+
+> 🔒 **セキュリティーについて**
+> - 認証ファイルにはログイン済みの Cookie が含まれるため、Qji は読み込み時に所有者とパーミッションを確認し、必要なら `600`（自分だけが読める）に自動修正します。
+> - YouTube Music のブラウザUI（ポート 8082）は、**このPC自身（127.0.0.1）からのみ**接続できます。同じネットワーク内のスマートフォン等からは開けません。
+> - 再生できるのは YouTube / YouTube Music の URL だけです。ジャケット画像も YouTube / Google の画像配信ホストからのみ取得します。
+> - `ytmusicapi` などが未インストールの場合、自動インストールの前に実行するコマンドを表示して確認します（既定は「いいえ」）。
 
 ### 音声操作（Vosk）
 
@@ -197,6 +206,39 @@ Loopback → DAC の経路だけを単体で確認したい場合：
 ```bash
 speaker-test -D hw:CARD=Loopback,DEV=0 -c 2 -r 48000 -F S32_LE
 ```
+
+**YouTube Music が再生できない場合**（`403` エラーが出る、すぐに曲が終わってしまう、など）
+
+YouTube 側の仕様変更により、`yt-dlp` が古いままだと再生できなくなります。まず、次のコマンドで `yt-dlp` を更新してください。
+
+```bash
+pip install -U "yt-dlp[default]" --break-system-packages
+```
+
+`[default]` を付けるのが重要です（YouTube の署名解読に必要な `yt-dlp-ejs` も一緒に入ります）。
+
+更新したのに直らない場合は、**古い `yt-dlp` が優先して呼ばれている**可能性があります（以前に `sudo` で入れた版や、`apt` で入れた版が残っている場合など）。次のコマンドで確認してください。
+
+```bash
+which -a yt-dlp      # 見つかった yt-dlp の一覧（先頭のものが使われます）
+yt-dlp --version     # 実際に使われる版
+```
+
+先頭に出た `yt-dlp` の版が古い場合は、システム全体へ更新します。
+
+```bash
+sudo pip3 install --upgrade "yt-dlp[default]" --break-system-packages
+```
+
+`apt` で入れた古い版が残っている場合は、`sudo apt remove yt-dlp` で削除してから上のコマンドを実行してください。
+
+あわせて `deno` が **2.3 以上**であることも確認してください。
+
+```bash
+deno --version       # 古い場合は: deno upgrade
+```
+
+なお、インストーラー（`install_qjidsp.sh`）を再実行すると、上記の更新と確認を自動で行います。
 
 ---
 

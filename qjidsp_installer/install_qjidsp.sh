@@ -73,7 +73,7 @@ echo ""
 echo -e "${BOLD}インストール先: ${QJI_DIR}${RESET}"
 echo "このスクリプトは以下を行います:"
 echo "  1. 必要なシステムパッケージのインストール"
-echo "  2. Pythonライブラリ／yt-dlpの更新"
+echo "  2. Pythonライブラリ／yt-dlp[default]の更新（YouTube Music再生に必須）"
 echo "  3. CamillaDSP本体のインストール"
 echo "  4. deno（YouTube Music再生の安定化に使用）のインストール"
 echo "  5. 仮想サウンドカード(snd-aloop)の設定"
@@ -122,8 +122,43 @@ pip install $PIP_FLAGS soundfile scipy
 pip install $PIP_FLAGS "git+https://github.com/HEnquist/pycamilladsp.git"
 ok "soundfile / scipy / pycamilladsp のインストール完了"
 
-pip install -U $PIP_FLAGS yt-dlp
-ok "yt-dlp を最新版に更新しました: $(yt-dlp --version 2>/dev/null || echo '（バージョン確認は後段で行います）')"
+# ★ yt-dlp は "yt-dlp[default]" で入れる。[default] を付けると、YouTubeの
+#   署名解読に必要な部品(yt-dlp-ejs)も一緒に入る。付けないと、YouTube側の
+#   仕様変更後に「403エラー」や「m4aばかりで再生できない」状態になる。
+#   （JS実行環境のdenoは、後段のステップ4で導入する）
+YTDLP_SPEC="yt-dlp[default]"
+
+# 1回目: ユーザー権限で更新（sudoなし）
+if ! pip install -U $PIP_FLAGS "$YTDLP_SPEC"; then
+    warn "ユーザー権限での yt-dlp 更新に失敗しました。sudo で再試行します。"
+    sudo pip3 install --upgrade $PIP_FLAGS "$YTDLP_SPEC"
+fi
+
+# ★ 機器によっては、以前 sudo で入れた(または apt で入れた)古い yt-dlp が
+#   /usr/local/bin や /usr/bin に残っていて、上の更新(ユーザー側 ~/.local/bin)
+#   より優先されてしまう。Qjiが呼び出すのは「PATH上で最初に見つかる yt-dlp」
+#   なので、pipで入れた版と、実際に呼ばれる版が食い違っていないかを確認する。
+PIP_YTDLP_VER="$(python3 -c 'import yt_dlp.version as v; print(v.__version__)' 2>/dev/null || true)"
+PATH_YTDLP_VER="$(yt-dlp --version 2>/dev/null || true)"
+
+if [ -n "$PIP_YTDLP_VER" ] && [ "$PIP_YTDLP_VER" != "$PATH_YTDLP_VER" ]; then
+    warn "PATH上のyt-dlp(${PATH_YTDLP_VER:-見つかりません})が、pipで入れた版(${PIP_YTDLP_VER})と異なります。"
+    warn "古い版が優先されている可能性があるため、システム全体へ sudo で更新します。"
+    sudo pip3 install --upgrade $PIP_FLAGS "$YTDLP_SPEC"
+    hash -r
+    PIP_YTDLP_VER="$(python3 -c 'import yt_dlp.version as v; print(v.__version__)' 2>/dev/null || true)"
+    PATH_YTDLP_VER="$(yt-dlp --version 2>/dev/null || true)"
+    if [ -n "$PIP_YTDLP_VER" ] && [ "$PIP_YTDLP_VER" != "$PATH_YTDLP_VER" ]; then
+        warn "まだ版が食い違っています。次で、どの yt-dlp が呼ばれているか確認してください:"
+        warn "  which -a yt-dlp"
+        warn "  （apt で入れた古い版は 'sudo apt remove yt-dlp' で削除できます）"
+    fi
+fi
+
+if python3 -c 'import yt_dlp' >/dev/null 2>&1 && ! python3 -c 'import yt_dlp_ejs' >/dev/null 2>&1; then
+    warn "yt-dlp-ejs が見つかりません。次を実行してください: pip install -U \"yt-dlp[default]\" $PIP_FLAGS"
+fi
+ok "yt-dlp を最新版に更新しました: ${PATH_YTDLP_VER:-（バージョン確認は後段で行います）}"
 
 # -------------------------------------------------------------
 # ステップ3: CamillaDSP本体のインストール
@@ -186,6 +221,18 @@ export PATH="$DENO_INSTALL/bin:$PATH"
 
 if command -v deno >/dev/null 2>&1; then
     ok "deno 動作確認OK: $(deno --version | head -n1)"
+    # ★ yt-dlpのYouTube署名解読(yt-dlp-ejs)は deno 2.3 以上が必要。
+    #   古いdenoが既に入っている場合、上の「既にインストール済み」で素通りするため警告する。
+    DENO_VER="$(deno --version | head -n1 | awk '{print $2}')"
+    DENO_MAJOR="${DENO_VER%%.*}"
+    DENO_REST="${DENO_VER#*.}"
+    DENO_MINOR="${DENO_REST%%.*}"
+    if [[ "$DENO_MAJOR" =~ ^[0-9]+$ && "$DENO_MINOR" =~ ^[0-9]+$ ]]; then
+        if [ "$DENO_MAJOR" -lt 2 ] || { [ "$DENO_MAJOR" -eq 2 ] && [ "$DENO_MINOR" -lt 3 ]; }; then
+            warn "deno ${DENO_VER} は古く、YouTube再生に必要な 2.3 以上を満たしていません。"
+            warn "  次を実行して更新してください: deno upgrade"
+        fi
+    fi
 else
     warn "denoコマンドが見つかりません。ターミナルを再起動後に再度お試しください。"
 fi
