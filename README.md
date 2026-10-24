@@ -15,7 +15,7 @@ Linux 向けのハイファイ音楽再生システムです。ローカルフ�
 ## 特徴
 
 - **ローカル音楽再生**：ジャケット画像選曲、フォルダー再生、作曲家／演奏者／指揮者／ジャンル／ムード等の条件検索
-- **ストリーミング対応**：Qobuz（Hi-Res）、SoundCloud、YouTube Music（`yt-dlp` + `ytmusicapi`）
+- **ストリーミング対応**：Qobuz（Hi-Res）、SoundCloud（公式APIで直接取得）、YouTube Music（`yt-dlp` + `ytmusicapi`）
 - **3D空間音響拡張（QjiDSP）**：CamillaDSP を用いた仮想サウンドカード（ALSA Loopback）経由のDSPパイプライン。6種類の音場プリセットを収録
   1. 濃厚ホール（静）— フル装備EQ・落ち着いた響き
   2. 濃厚ホール（動）— フル装備EQ・空気の流れ
@@ -87,9 +87,9 @@ bash install_qjidsp.sh
 インストーラーは以下を行います。
 
 - 必要パッケージ（ffmpeg, alsa-utils, git 等）のインストール
-- Python ライブラリ（soundfile, scipy, pycamilladsp）と `yt-dlp` の更新
+- Python ライブラリ（soundfile, scipy, pycamilladsp）と `yt-dlp[default]` の更新（YouTube 再生に必要な部品 `yt-dlp-ejs` を含みます。古い `yt-dlp` が優先されて残っている場合は、自動で検出して `sudo` で更新します）
 - CamillaDSP 本体のダウンロード
-- `deno`（YouTube Music 再生の安定化に使用）のインストール
+- `deno`（YouTube の署名解読に使用。**2.3 以上が必要**）のインストール
 - 仮想サウンドカード（`snd-aloop`）の有効化
 - `~/qji/` へ本体一式・DSP設定ファイル（音場 v1〜v6）・IR（残響）ファイルを配置
 
@@ -140,10 +140,39 @@ Qji Peak Monitorのアップデート確認と同じ方式です。
 「いいね」した曲やライブラリへアクセスする場合のみ、ブラウザ認証を設定してください。
 
 ```bash
-python3 -c "from ytmusicapi import YTMusic; YTMusic.setup(filepath='~/.config/qji_ytmusic_auth.json')"
+mkdir -p ~/.config
+python3 -c "import os, ytmusicapi; ytmusicapi.setup(filepath=os.path.expanduser('~/.config/qji_ytmusic_auth.json'))"
 ```
 
+実行すると、ブラウザ（Chrome / Firefox）で music.youtube.com にログインした状態でコピーした「リクエストヘッダー」の貼り付けを求められます。貼り付けたあと `Ctrl-D` で確定してください。
+
 未設定でも `yt-dlp` 検索で再生自体は可能です。
+
+> 🔒 **セキュリティーについて**
+> - 認証ファイルにはログイン済みの Cookie が含まれるため、Qji は読み込み時に所有者とパーミッションを確認し、必要なら `600`（自分だけが読める）に自動修正します。
+> - YouTube Music のブラウザUI（ポート 8082）は、**このPC自身（127.0.0.1）からのみ**接続できます。同じネットワーク内のスマートフォン等からは開けません。
+> - 再生できるのは YouTube / YouTube Music の URL だけです。ジャケット画像も YouTube / Google の画像配信ホストからのみ取得します。
+> - `ytmusicapi` などが未インストールの場合、自動インストールの前に実行するコマンドを表示して確認します（既定は「いいえ」）。
+
+### SoundCloud
+
+ログインや認証の設定は不要です。検索・再生に必要な `client_id` は、SoundCloud のウェブサイトから自動で取得・更新されます（`~/.config/qji_soundcloud.json` に保存され、ファイルの権限は `600` です）。
+
+曲もプレイリスト（`/sets/…`）も、SoundCloud の API で直接取得します。`yt-dlp` は、API で取得できなかったときの予備としてだけ使います。
+
+> 🔒 **セキュリティーについて**
+> - SoundCloud のブラウザUI（ポート 8081）は、**このPC自身（127.0.0.1）からのみ**接続できます。同じネットワーク内のスマートフォン等からは開けません。あわせて、他のサイトからの操作（CSRF・DNSリバインディング）を拒否する確認を行っています。
+> - 再生できるのは SoundCloud（`soundcloud.com`）の URL だけです。ジャケット画像も SoundCloud の画像配信ホストからのみ取得します。
+> - SoundCloud が返したストリームURLは、SoundCloud の配信ホストの `https` に限って使います。ffmpeg には `-protocol_whitelist` を付け、`file:` などローカルのものを読ませません。
+> - 曲名などの外部文字列から、端末の制御シーケンスを取り除いてから表示します。
+> - 再生リクエストの受け渡しファイルやジャケット画像の一時ファイルは、共有の `/tmp` ではなく、自分専用のフォルダー（`$XDG_RUNTIME_DIR/qji`、なければ `/tmp/qji-<UID>`）に権限 `600` で置きます。
+> - `yt-dlp` 用の Cookie ファイルを指定している場合は、読み込み時に所有者とパーミッションを確認し、必要なら `600` に自動修正します。
+> - `requests` が未インストールの場合、自動インストールの前に実行するコマンドを表示して確認します（既定は「いいえ」）。
+
+> ℹ️ **再生について**
+> - DSPモード（出力デバイスで「Loopback」を選んだとき）は、ffmpeg 側で 48000Hz に変換して CamillaDSP へ渡します。直接出力のときは、SoundCloud 本来の 44.1kHz のまま出力します。
+> - ピークモニターの表示は、SoundCloud の再生でも使えます。
+> - SoundCloud 側で **DRM 保護**されている曲は、ffmpeg では再生できません。その曲は自動でスキップされます（別のアップロード音源が再生できることもあります）。
 
 ### 音声操作（Vosk）
 
@@ -197,6 +226,63 @@ Loopback → DAC の経路だけを単体で確認したい場合：
 ```bash
 speaker-test -D hw:CARD=Loopback,DEV=0 -c 2 -r 48000 -F S32_LE
 ```
+
+**YouTube Music が再生できない場合**（`403` エラーが出る、すぐに曲が終わってしまう、など）
+
+YouTube 側の仕様変更により、`yt-dlp` が古いままだと再生できなくなります。まず、次のコマンドで `yt-dlp` を更新してください。
+
+```bash
+pip install -U "yt-dlp[default]" --break-system-packages
+```
+
+`[default]` を付けるのが重要です（YouTube の署名解読に必要な `yt-dlp-ejs` も一緒に入ります）。
+
+更新したのに直らない場合は、**古い `yt-dlp` が優先して呼ばれている**可能性があります（以前に `sudo` で入れた版や、`apt` で入れた版が残っている場合など）。次のコマンドで確認してください。
+
+```bash
+which -a yt-dlp      # 見つかった yt-dlp の一覧（先頭のものが使われます）
+yt-dlp --version     # 実際に使われる版
+```
+
+先頭に出た `yt-dlp` の版が古い場合は、システム全体へ更新します。
+
+```bash
+sudo pip3 install --upgrade "yt-dlp[default]" --break-system-packages
+```
+
+`apt` で入れた古い版が残っている場合は、`sudo apt remove yt-dlp` で削除してから上のコマンドを実行してください。
+
+あわせて `deno` が **2.3 以上**であることも確認してください。
+
+```bash
+deno --version       # 古い場合は: deno upgrade
+```
+
+なお、インストーラー（`install_qjidsp.sh`）を再実行すると、上記の更新と確認を自動で行います。
+
+---
+
+
+
+**SoundCloud が再生できない場合**
+
+再生を始めると、画面に再生可否の手がかりが出ます。
+
+- `📡 利用可能: …` ── その曲で再生できる配信形式の一覧です。暗号化（DRM）のため除外した形式があれば、その件数も出ます。1つの形式が失敗（`HTTP 404` など）しても、次の形式を自動で試します。
+- `🔒 DRM 保護の曲のため再生できません（スキップします）` ── SoundCloud 側で DRM 保護された曲です。ffmpeg では再生できないため、仕様としてスキップされます。`yt-dlp` を更新しても変わりません。
+- `許可されていない配信元のため…` ── SoundCloud が新しい配信ホストを使い始めた可能性があります。表示されたホスト名を添えて、Issue でお知らせください。
+- `HTTP 401` / `403` が続く ── 取得済みの `client_id` が失効している可能性があります。通常は自動で更新されますが、直らない場合は、次のコマンドで保存済みの `client_id` を消してから、もう一度再生してください。
+
+```bash
+python3 - <<'EOF'
+import json, pathlib
+p = pathlib.Path.home()/'.config'/'qji_soundcloud.json'
+c = json.loads(p.read_text()); c.pop('client_id', None); c.pop('client_id_fetched_at', None)
+p.write_text(json.dumps(c, ensure_ascii=False, indent=2))
+EOF
+```
+
+SoundCloud の再生は `yt-dlp` に頼っていないため、`yt-dlp` が古くても、通常は影響しません（予備の経路でだけ使います）。
 
 ---
 

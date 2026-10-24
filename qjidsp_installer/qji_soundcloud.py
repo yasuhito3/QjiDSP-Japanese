@@ -15,6 +15,261 @@ import termios, tty
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
+import stat as _stat
+from urllib.parse import urlparse as _urlparse, urljoin as _urljoin
+
+# ═══════════════════════════════════════════════════════════════════════════
+# セキュリティー補助（外部から来る URL・文字列・ファイルを、信用しないための関数群）
+# ═══════════════════════════════════════════════════════════════════════════
+
+# 再生・取得を許可するのは、SoundCloud の URL だけ（サブドメインを含む）
+_ALLOWED_MEDIA_HOSTS  = ('soundcloud.com',)
+# SoundCloud API v2 と、そこから返る transcoding URL の配信ホスト
+_ALLOWED_API_HOSTS    = ('soundcloud.com', 'sndcdn.com')
+# 実際の音声ストリームの配信ホスト（ffmpeg に渡す URL はここだけ許可）
+_ALLOWED_STREAM_HOSTS = ('sndcdn.com', 'soundcloud.com', 'soundcloud.cloud')
+# ジャケット画像を取りに行ってよいホスト
+_ALLOWED_IMAGE_HOSTS  = ('sndcdn.com', 'soundcloud.com')
+# client_id 抽出用の JavaScript を取りに行ってよいホスト
+_ALLOWED_SCRIPT_HOSTS = ('sndcdn.com',)
+_MAX_IMAGE_BYTES  = 8 * 1024 * 1024
+_MAX_JSON_BYTES   = 8 * 1024 * 1024
+_MAX_SCRIPT_BYTES = 8 * 1024 * 1024
+_ANSI_RE = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]')
+_CTRL_RE = re.compile(r'[\x00-\x1f\x7f-\x9f]')
+
+
+def _host_allowed(host, allowed) -> bool:
+    host = (host or '').lower().rstrip('.')
+    return any(host == h or host.endswith('.' + h) for h in allowed)
+
+
+def _safe_url(url, allowed_hosts, schemes) -> Optional[str]:
+    """許可したホストの URL だけを返す。それ以外（先頭が '-' の文字列、制御文字入り、
+    他のホスト、ユーザー名つき、特殊なポートなど）は None。"""
+    if not isinstance(url, str):
+        return None
+    url = url.strip()
+    if not url or len(url) > 2000 or url.startswith('-') or _CTRL_RE.search(url) or ' ' in url:
+        return None
+    try:
+        u = _urlparse(url)
+        port = u.port
+    except ValueError:
+        return None
+    if u.scheme not in schemes or u.username or u.password or port not in (None, 80, 443):
+        return None
+    if not _host_allowed(u.hostname, allowed_hosts):
+        return None
+    return url
+
+
+def _safe_media_url(url) -> Optional[str]:
+    return _safe_url(url, _ALLOWED_MEDIA_HOSTS, ('http', 'https'))
+
+
+def _safe_image_url(url) -> Optional[str]:
+    return _safe_url(url, _ALLOWED_IMAGE_HOSTS, ('https',))
+
+
+def _safe_stream_url(url) -> Optional[str]:
+    """ffmpeg に渡してよいストリーム URL（https の SoundCloud 配信ホストのみ）。"""
+    return _safe_url(url, _ALLOWED_STREAM_HOSTS, ('https',))
+
+
+def _clean(value, maxlen: int = 300) -> str:
+    """曲名などの外部文字列から、端末の制御シーケンス（色・カーソル移動・タイトル変更など）を取り除く。"""
+    text = '' if value is None else str(value)
+    text = _ANSI_RE.sub('', text)
+    text = _CTRL_RE.sub(' ', text)
+    return text.strip()[:maxlen]
+
+
+def _as_int(v, default, lo=None, hi=None) -> int:
+    try:
+        if isinstance(v, bool):
+            raise ValueError
+        n = int(v)
+    except (TypeError, ValueError):
+        n = default
+    if lo is not None:
+        n = max(lo, n)
+    if hi is not None:
+        n = min(hi, n)
+    return n
+
+
+def _fetch_limited(url, allowed_hosts, *, params=None, headers=None, timeout=12,
+                   max_bytes=_MAX_JSON_BYTES, content_type=None):
+    """許可したホストの https URL だけを取得する。リダイレクトは1回ずつ検証し、
+    サイズ上限を超えたら打ち切る。戻り値: (HTTP ステータス, 本文 bytes または None)。
+    ステータス 0 は「接続前に拒否した／通信エラー」。"""
+    try:
+        import requests
+        cur = _safe_url(url, allowed_hosts, ('https',))
+        if not cur:
+            return 0, None
+        hdrs = {'User-Agent': SC_AGENT}
+        hdrs.update(headers or {})
+        cur_params = params
+        for _hop in range(4):
+            r = requests.get(cur, params=cur_params, headers=hdrs, timeout=timeout,
+                             stream=True, allow_redirects=False)
+            if r.status_code in (301, 302, 303, 307, 308):
+                nxt = _safe_url(_urljoin(cur, r.headers.get('Location', '')),
+                                allowed_hosts, ('https',))
+                r.close()
+                if not nxt:
+                    return 0, None
+                cur, cur_params = nxt, None
+                continue
+            break
+        else:
+            return 0, None
+        try:
+            status = r.status_code
+            if status != 200:
+                return status, None
+            if content_type and not str(r.headers.get('Content-Type', '')).lower().startswith(content_type):
+                return status, None
+            buf = bytearray()
+            for chunk in r.iter_content(65536):
+                buf += chunk
+                if len(buf) > max_bytes:
+                    return status, None
+            return status, bytes(buf)
+        finally:
+            r.close()
+    except Exception:
+        return 0, None
+
+
+_PRIV_DIR = None
+
+
+def _private_dir() -> Path:
+    """自分だけが読み書きできる作業フォルダー。共有の /tmp に、固定名のファイルを置かないために使う。
+    他人の所有・シンボリックリンクなら使わず、新しい専用フォルダーにする。"""
+    global _PRIV_DIR
+    if _PRIV_DIR is not None:
+        return _PRIV_DIR
+    uid = os.getuid()
+    cands = []
+    xdg = os.environ.get('XDG_RUNTIME_DIR')
+    if xdg:
+        cands.append(Path(xdg) / 'qji')
+    cands.append(Path(tempfile.gettempdir()) / f'qji-{uid}')
+    for p in cands:
+        try:
+            p.mkdir(mode=0o700, exist_ok=True)
+            st = os.lstat(p)
+            if not _stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+                continue
+            if st.st_mode & 0o077:
+                os.chmod(p, 0o700)
+            _PRIV_DIR = p
+            return p
+        except OSError:
+            continue
+    _PRIV_DIR = Path(tempfile.mkdtemp(prefix='qji-'))
+    return _PRIV_DIR
+
+
+def _write_private(path, data) -> None:
+    """権限600で新規作成してから、置き換える（書き込み中に、他のユーザーに読まれる隙間を作らない）。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(data, str):
+        data = data.encode('utf-8')
+    tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0)
+    fd = os.open(str(tmp), flags, 0o600)
+    with os.fdopen(fd, 'wb') as f:
+        f.write(data)
+    os.replace(str(tmp), str(path))
+
+
+def _ensure_private_file(path) -> bool:
+    """Cookie など秘密を含むファイルを、安全に読める状態か確認する。
+    シンボリックリンクや他人所有のファイルは拒否し、権限が緩ければ 600 に締める。"""
+    try:
+        st = os.lstat(str(path))
+    except OSError:
+        return False
+    if not _stat.S_ISREG(st.st_mode):
+        print(f'  ⚠ {path} は通常のファイルではないため、使いません')
+        return False
+    if st.st_uid != os.getuid():
+        print(f'  ⚠ {path} が他のユーザーの所有のため、使いません')
+        return False
+    if st.st_mode & 0o077:
+        try:
+            os.chmod(str(path), 0o600)
+            print(f'  🔒 {path} の権限を 600 に修正しました（Cookie を含むため、自分だけが読める必要があります）')
+        except OSError:
+            print(f'  ⚠ {path} の権限を修正できません。手動で chmod 600 してください')
+            return False
+    return True
+
+
+_install_declined = set()
+
+
+def _confirm_install(pkg: str, cmd: list) -> bool:
+    """実行中の自動インストールの前に、内容を見せて確認する（既定は N）。"""
+    if pkg in _install_declined:
+        return False
+    print(f'  📦 {pkg} が見つかりません。次のコマンドでインストールしますか？')
+    print('     ' + ' '.join(cmd))
+    try:
+        ans = input('     [y/N]: ').strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ans = ''
+    if ans in ('y', 'yes'):
+        return True
+    _install_declined.add(pkg)
+    return False
+
+
+def _apply_audio_settings(state: dict, audio) -> None:
+    """お気に入り・保存プレイリスト・ブラウザ UI からの音響設定を、
+    許可した項目・範囲だけ受け付ける（フィルター文字列に任意の値が紛れ込まないように）。"""
+    if not isinstance(audio, dict):
+        return
+    if audio.get('gain_preset') in GAIN_PRESETS_DB:
+        state['gain_preset'] = audio['gain_preset']
+    if audio.get('filter_preset') in FILTER_PRESETS:
+        state['filter_preset'] = audio['filter_preset']
+    for k in ('air_layer', 'musikverein', 'musikverein_room_effects', 'tinnitus'):
+        if isinstance(audio.get(k), bool):
+            state[k] = audio[k]
+    v = audio.get('volume')
+    if not isinstance(v, bool) and isinstance(v, (int, float)):
+        state['volume'] = _as_int(v, state.get('volume', 12), -20, 30)
+    em = audio.get('echo_mode')
+    if isinstance(em, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,24}', em):
+        state['echo_mode'] = em
+
+
+def _sanitize_track(t) -> Optional[dict]:
+    """外部（ブラウザ UI・保存ファイルなど）から来た曲情報を検証する。
+    URL が許可外なら None。文字列は制御文字を除き、数値は範囲内に収める。"""
+    if not isinstance(t, dict):
+        return None
+    url = _safe_media_url(t.get('url', ''))
+    if not url:
+        return None
+    return {
+        'url': url,
+        'id': _clean(t.get('id', ''), 64),
+        'title': _clean(t.get('title', '')), 'artist': _clean(t.get('artist', '')),
+        'genre': _clean(t.get('genre', '')),
+        'cover_url': str(t.get('cover_url') or t.get('art') or '')[:500],
+        'duration': _as_int(t.get('duration', 0), 0, 0, 24 * 3600),
+        'likes': _as_int(t.get('likes', 0), 0, 0, 10**12),
+        'plays': _as_int(t.get('plays', 0), 0, 0, 10**12),
+    }
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 定数
@@ -23,8 +278,10 @@ from typing import Optional, List, Dict, Tuple
 CONFIG_PATH      = Path.home() / '.config' / 'qji_soundcloud.json'
 FAVS_PATH        = Path.home() / '.config' / 'qji_soundcloud_favorites.json'
 PLAYLISTS_PATH   = Path.home() / '.config' / 'qji_soundcloud_playlists.json'
-REQUEST_PATH = Path('/tmp/qji_soundcloud_request.json')
-_JACKET_TMP  = Path(tempfile.gettempdir()) / 'qji_soundcloud_jacket.jpg'
+REQUEST_PATH = _private_dir() / 'qji_soundcloud_request.json'   # 共有の /tmp ではなく、自分専用のフォルダー
+_JACKET_TMP  = _private_dir() / 'qji_soundcloud_jacket.jpg'
+BROWSER_PORT = 8081
+BROWSER_URL  = f'http://127.0.0.1:{BROWSER_PORT}'   # ブラウザ UI は自分の PC からだけ（127.0.0.1 限定）
 SC_API_BASE  = 'https://api-v2.soundcloud.com'
 SC_AGENT     = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
                 '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
@@ -213,37 +470,35 @@ def _load_config() -> dict:
         return {}
 
 def _save_config(cfg: dict):
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
-    CONFIG_PATH.chmod(0o600)
+    _write_private(CONFIG_PATH, json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
 def _extract_client_id() -> Optional[str]:
-    """SoundCloud ウェブサイトの JavaScript から client_id を抽出する。"""
-    try:
-        import requests
-        r = requests.get('https://soundcloud.com',
-                         headers={'User-Agent': SC_AGENT}, timeout=15)
-        scripts = re.findall(
-            r'<script[^>]+src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"',
-            r.text)
-        for script_url in reversed(scripts[-8:]):
-            try:
-                sr = requests.get(script_url,
-                                  headers={'User-Agent': SC_AGENT}, timeout=10)
-                for pattern in [
-                    r'client_id:"([a-zA-Z0-9]{32})"',
-                    r'client_id,"([a-zA-Z0-9]{32})"',
-                    r'"client_id":"([a-zA-Z0-9]{32})"',
-                    r'clientId:"([a-zA-Z0-9]{32})"',
-                ]:
-                    m = re.search(pattern, sr.text)
-                    if m:
-                        return m.group(1)
-            except Exception:
-                continue
-    except Exception:
-        pass
+    """SoundCloud ウェブサイトの JavaScript から client_id を抽出する。
+    取得先は soundcloud.com と sndcdn.com の https だけ（リダイレクトも検証、サイズ上限あり）。"""
+    status, body = _fetch_limited('https://soundcloud.com', ('soundcloud.com',),
+                                  timeout=15, max_bytes=_MAX_SCRIPT_BYTES)
+    if not body:
+        return None
+    html_text = body.decode('utf-8', errors='replace')
+    scripts = re.findall(
+        r'<script[^>]+src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"',
+        html_text)
+    for script_url in reversed(scripts[-8:]):
+        st, js = _fetch_limited(script_url, _ALLOWED_SCRIPT_HOSTS,
+                                timeout=10, max_bytes=_MAX_SCRIPT_BYTES)
+        if not js:
+            continue
+        text = js.decode('utf-8', errors='replace')
+        for pattern in [
+            r'client_id:"([a-zA-Z0-9]{32})"',
+            r'client_id,"([a-zA-Z0-9]{32})"',
+            r'"client_id":"([a-zA-Z0-9]{32})"',
+            r'clientId:"([a-zA-Z0-9]{32})"',
+        ]:
+            m = re.search(pattern, text)
+            if m:
+                return m.group(1)
     return None
 
 
@@ -281,14 +536,71 @@ def _get_client_id(force_refresh: bool = False) -> Optional[str]:
 
 def _sc_api(endpoint: str, params: dict, client_id: str) -> Optional[dict]:
     """SoundCloud API v2 を呼び出す。"""
-    try:
-        import requests
-        p = {'client_id': client_id, 'limit': 20, **params}
-        r = requests.get(f'{SC_API_BASE}{endpoint}',
-                         params=p, headers={'User-Agent': SC_AGENT}, timeout=12)
-        return r.json() if r.status_code == 200 else None
-    except Exception:
+    p = {'client_id': client_id, 'limit': 20, **params}
+    status, body = _fetch_limited(f'{SC_API_BASE}{endpoint}', _ALLOWED_API_HOSTS,
+                                  params=p, timeout=12, max_bytes=_MAX_JSON_BYTES)
+    if status != 200 or not body:
         return None
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _sc_api_raw(endpoint: str, params: dict, client_id: str):
+    """SoundCloud API v2 を呼び、JSON（dict または list）をそのまま返す。失敗は None。"""
+    p = {'client_id': client_id, **params}
+    status, body = _fetch_limited(f'{SC_API_BASE}{endpoint}', _ALLOWED_API_HOSTS,
+                                  params=p, timeout=15, max_bytes=_MAX_JSON_BYTES)
+    if status != 200 or not body:
+        return None
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    return data if isinstance(data, (dict, list)) else None
+
+
+def _playlist_tracks_via_api(playlist_url: str) -> Optional[List[dict]]:
+    """
+    SoundCloud API でプレイリスト（/sets/...）の曲を取得する（yt-dlp 不要）。
+      1. /resolve?url=...  → プレイリスト。先頭数曲だけ詳細つき、残りは id だけの「骨組み」で返る
+      2. /tracks?ids=...   → 骨組みの曲の詳細を、まとめて取得（30曲ずつ）
+    プレイリスト以外（ユーザーページなど）や失敗のときは None（呼び出し側が yt-dlp にフォールバック）。
+    """
+    for attempt in (0, 1):
+        cid = _get_client_id(force_refresh=(attempt == 1))
+        if not cid:
+            return None
+        data = _sc_api_raw('/resolve', {'url': playlist_url}, cid)
+        if isinstance(data, dict):
+            break
+    else:
+        return None
+    raw = data.get('tracks')
+    if not isinstance(raw, list) or not raw:
+        return None
+    raw = [t for t in raw[:500] if isinstance(t, dict)]
+    full, need = {}, []
+    for t in raw:
+        if t.get('permalink_url') and t.get('title'):
+            full[t.get('id')] = t
+        elif isinstance(t.get('id'), int):
+            need.append(t['id'])
+    for k in range(0, len(need), 30):
+        chunk = need[k:k + 30]
+        res = _sc_api_raw('/tracks', {'ids': ','.join(str(i) for i in chunk)}, cid)
+        for it in (res if isinstance(res, list) else []):
+            if isinstance(it, dict):
+                full[it.get('id')] = it
+    out = []
+    for t in raw:                       # プレイリストの並び順のまま
+        it = full.get(t.get('id'))
+        x = _track_from_api(it) if it else None
+        if x:
+            out.append(x)
+    return out or None
 
 
 def _normalize_artwork(url: Optional[str]) -> str:
@@ -299,20 +611,25 @@ def _normalize_artwork(url: Optional[str]) -> str:
                   '-t500x500.jpg', url)
 
 
-def _track_from_api(item: dict) -> dict:
-    """API レスポンス 1 件を内部トラック dict に変換する。"""
-    user = item.get('user') or {}
+def _track_from_api(item: dict) -> Optional[dict]:
+    """API レスポンス 1 件を内部トラック dict に変換する。URL が許可外なら None。"""
+    if not isinstance(item, dict):
+        return None
+    url = _safe_media_url(item.get('permalink_url', ''))
+    if not url:
+        return None
+    user = item.get('user') if isinstance(item.get('user'), dict) else {}
     return {
-        'url':       item.get('permalink_url', ''),
-        'id':        str(item.get('id', '')),
-        'title':     item.get('title', ''),
-        'artist':    user.get('username', ''),
+        'url':       url,
+        'id':        _clean(item.get('id', ''), 64),
+        'title':     _clean(item.get('title', '')),
+        'artist':    _clean(user.get('username', '')),
         'cover_url': _normalize_artwork(
-                         item.get('artwork_url') or user.get('avatar_url')),
-        'duration':  int((item.get('duration') or 0) // 1000),  # ms → sec
-        'genre':     item.get('genre', ''),
-        'likes':     item.get('likes_count', 0),
-        'plays':     item.get('playback_count', 0),
+                         item.get('artwork_url') or user.get('avatar_url'))[:500],
+        'duration':  _as_int(item.get('duration') or 0, 0, 0, 10**9) // 1000,   # ms → sec
+        'genre':     _clean(item.get('genre', '')),
+        'likes':     _as_int(item.get('likes_count', 0), 0, 0, 10**12),
+        'plays':     _as_int(item.get('playback_count', 0), 0, 0, 10**12),
     }
 
 
@@ -325,7 +642,10 @@ def search_tracks(query: str, limit: int = 20,
     d = _sc_api('/search/tracks', {'q': query, 'limit': limit}, cid)
     if not d:
         return []
-    return [_track_from_api(t) for t in d.get('collection', [])]
+    coll = d.get('collection', [])
+    if not isinstance(coll, list):
+        return []
+    return [x for x in (_track_from_api(t) for t in coll) if x]
 
 
 def search_playlists(query: str, limit: int = 10,
@@ -338,16 +658,22 @@ def search_playlists(query: str, limit: int = 10,
     if not d:
         return []
     results = []
-    for item in d.get('collection', []):
-        user = item.get('user') or {}
+    coll = d.get('collection', [])
+    for item in (coll if isinstance(coll, list) else []):
+        if not isinstance(item, dict):
+            continue
+        url = _safe_media_url(item.get('permalink_url', ''))
+        if not url:
+            continue
+        user = item.get('user') if isinstance(item.get('user'), dict) else {}
         results.append({
-            'url':         item.get('permalink_url', ''),
-            'id':          str(item.get('id', '')),
-            'title':       item.get('title', ''),
-            'artist':      user.get('username', ''),
-            'cover_url':   _normalize_artwork(item.get('artwork_url')),
-            'track_count': item.get('track_count', 0),
-            'duration':    int((item.get('duration') or 0) // 1000),
+            'url':         url,
+            'id':          _clean(item.get('id', ''), 64),
+            'title':       _clean(item.get('title', '')),
+            'artist':      _clean(user.get('username', '')),
+            'cover_url':   _normalize_artwork(item.get('artwork_url'))[:500],
+            'track_count': _as_int(item.get('track_count', 0), 0, 0, 100000),
+            'duration':    _as_int(item.get('duration') or 0, 0, 0, 10**9) // 1000,
         })
     return results
 
@@ -357,8 +683,21 @@ def get_playlist_tracks(playlist_url: str) -> List[dict]:
     SoundCloud プレイリスト/セット URL からトラックリストを取得する。
     yt-dlp の --flat-playlist を使って高速に取得する。
     """
+    playlist_url = _safe_media_url(playlist_url)
+    if not playlist_url:
+        print('  ⚠ 対応していない URL です（soundcloud.com のみ）')
+        return []
+    # ① SoundCloud API（メイン・yt-dlp の SoundCloud 対応が壊れていても動く）
+    try:
+        via_api = _playlist_tracks_via_api(playlist_url)
+    except Exception:
+        via_api = None
+    if via_api:
+        return via_api
+
+    # ② yt-dlp（フォールバック）
     cmd = ['yt-dlp', '--flat-playlist', '--dump-json', '--no-warnings',
-           '--quiet', playlist_url]
+           '--quiet', '--', playlist_url]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         tracks = []
@@ -368,23 +707,33 @@ def get_playlist_tracks(playlist_url: str) -> List[dict]:
                 continue
             try:
                 item = json.loads(line)
-                tracks.append({
-                    'url':       item.get('url', '') or item.get('webpage_url', ''),
-                    'id':        str(item.get('id', '')),
-                    'title':     item.get('title', ''),
-                    'artist':    item.get('uploader', item.get('channel', '')),
-                    'cover_url': _normalize_artwork(item.get('thumbnail', '')),
-                    'duration':  int(item.get('duration') or 0),
-                    'genre':     item.get('genre', ''),
-                    'likes':     item.get('like_count', 0),
-                    'plays':     item.get('view_count', 0),
-                })
             except (json.JSONDecodeError, KeyError):
                 continue
+            if not isinstance(item, dict):
+                continue
+            t = _sanitize_track({
+                'url':       item.get('url', '') or item.get('webpage_url', ''),
+                'id':        item.get('id', ''),
+                'title':     item.get('title', ''),
+                'artist':    item.get('uploader', item.get('channel', '')),
+                'cover_url': _normalize_artwork(item.get('thumbnail', '')),
+                'duration':  item.get('duration') or 0,
+                'genre':     item.get('genre', ''),
+                'likes':     item.get('like_count', 0),
+                'plays':     item.get('view_count', 0),
+            })
+            if t:
+                tracks.append(t)
+            if len(tracks) >= 500:
+                break
         return tracks
     except Exception as e:
-        print(f'  ⚠ プレイリスト取得エラー: {e}')
+        print(f'  ⚠ プレイリスト取得エラー: {_clean(e, 120)}')
         return []
+
+
+class _DrmProtected(Exception):
+    """この曲は DRM 保護のみで、ffmpeg では再生できない（再取得・フォールバックしても無駄）。"""
 
 
 def _resolve_via_sc_api(track_url: str, client_id: str) -> Optional[str]:
@@ -393,71 +742,107 @@ def _resolve_via_sc_api(track_url: str, client_id: str) -> Optional[str]:
     yt-dlp 不要・高速・タイムアウトなし。
 
     手順:
-      1. /resolve?url=...  → トラック情報（media.transcodings）
+      1. /resolve?url=...  → トラック情報（media.transcodings と track_authorization）
       2. transcoding URL   → 実際のストリームURL
     優先順位: progressive MP3 > HLS MP3 > HLS Opus
-    """
-    try:
-        import requests
-        sess = requests.Session()
-        sess.headers['User-Agent'] = SC_AGENT
+    ・暗号化 HLS（DRM: cbc/ctr-encrypted-hls、skd:// 鍵）は ffmpeg で再生できないため除外する。
+    ・1つの形式が失敗（404 など）しても、次の候補を順に試す。
+    ・track_authorization を付けて問い合わせる（yt-dlp と同じ。付けないと 404/401 になるトラックがある）。
 
+    API が返した URL は、そのまま信用しない:
+      ・transcoding URL は SoundCloud の https だけ取得する（client_id を他所へ送らない）
+      ・最終のストリーム URL も SoundCloud の配信ホストの https だけ許可する
+    """
+    track_url = _safe_media_url(track_url)
+    if not track_url:
+        return None
+    try:
         # Step 1: URLからトラック情報を取得
-        r = sess.get(f'{SC_API_BASE}/resolve',
-                     params={'url': track_url, 'client_id': client_id},
-                     timeout=12)
-        if r.status_code != 200:
-            print(f'  ⚠ /resolve → HTTP {r.status_code}')
+        status, body = _fetch_limited(f'{SC_API_BASE}/resolve', _ALLOWED_API_HOSTS,
+                                      params={'url': track_url, 'client_id': client_id},
+                                      timeout=12)
+        if status != 200 or not body:
+            print(f'  ⚠ /resolve → HTTP {status}')
             return None
 
-        data = r.json()
-        transcodings = (data.get('media') or {}).get('transcodings', [])
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            return None
+        media = data.get('media') if isinstance(data.get('media'), dict) else {}
+        transcodings = [t for t in (media.get('transcodings') or []) if isinstance(t, dict)]
         if not transcodings:
             print('  ⚠ transcodings が空です（非公開トラック？）')
             return None
 
-        # Step 2: 最適なフォーマットを選択
-        # progressive MP3（直接URLで ffmpeg との相性が最良）
-        # → なければ HLS MP3 → なければ HLS Opus
+        auth = data.get('track_authorization')
+        auth = auth if isinstance(auth, str) and re.fullmatch(r'[A-Za-z0-9._~-]{1,4000}', auth) else None
+
+        # Step 2: 候補を点数順に並べる（暗号化は除外）
+        def _info(tc):
+            fmt = tc.get('format') if isinstance(tc.get('format'), dict) else {}
+            return str(fmt.get('protocol', '')), str(fmt.get('mime_type', ''))
+
         def _score(tc):
-            proto = (tc.get('format') or {}).get('protocol', '')
-            mime  = (tc.get('format') or {}).get('mime_type', '')
+            proto, mime = _info(tc)
             if proto == 'progressive' and 'mpeg' in mime:
                 return 3
             if proto == 'hls' and 'mpeg' in mime:
                 return 2
             if proto == 'hls':
                 return 1
+            if proto == 'progressive':
+                return 1
             return 0
 
-        best = max(transcodings, key=_score)
-        tc_url = best.get('url', '')
-        proto  = (best.get('format') or {}).get('protocol', '')
-        mime   = (best.get('format') or {}).get('mime_type', '')
-        if not tc_url:
-            print('  ⚠ transcoding URL が空です')
-            return None
+        usable, skipped = [], []
+        for tc in transcodings:
+            proto, mime = _info(tc)
+            (skipped if 'encrypted' in proto else usable).append(tc)
+        usable.sort(key=_score, reverse=True)
+        print('  📡 利用可能: ' + (', '.join(f'{_clean(_info(t)[0], 30)}' for t in usable) or 'なし')
+              + (f'  / 暗号化(DRM)のため除外: {len(skipped)}件' if skipped else ''))
+        if not usable:
+            raise _DrmProtected()
 
-        print(f'  📡 形式: {proto} / {mime}')
+        # Step 3: transcoding URL → 実際のストリームURLへ解決（失敗したら次の候補へ）
+        for tc in usable:
+            tc_url = tc.get('url', '')
+            proto, mime = _info(tc)
+            if not tc_url:
+                continue
+            params = {'client_id': client_id}
+            if auth:
+                params['track_authorization'] = auth
+            status2, body2 = _fetch_limited(tc_url, _ALLOWED_API_HOSTS, params=params, timeout=12)
+            if status2 != 200 or not body2:
+                print(f'  ⚠ {_clean(proto, 30)} / {_clean(mime, 40)} → HTTP {status2}（次の形式を試します）')
+                continue
+            try:
+                data2 = json.loads(body2)
+            except ValueError:
+                continue
+            raw_stream = data2.get('url', '') if isinstance(data2, dict) else ''
+            stream_url = _safe_stream_url(raw_stream)
+            if not stream_url:
+                if raw_stream:
+                    host = (_urlparse(str(raw_stream)).hostname or '?') if isinstance(raw_stream, str) else '?'
+                    print(f'  ⚠ 許可されていない配信元のため、この形式は使いません: {_clean(host, 80)}')
+                continue
+            # 念のため: DRM（FairPlay 等）の配信パスなら、プロトコル名が 'hls' でも使わない
+            if re.search(r'/(cbcs|cenc|ctr|cbc)/', _urlparse(stream_url).path):
+                print(f'  ⚠ DRM 保護の配信のため、この形式は使いません（{_clean(proto, 30)}）')
+                continue
+            print(f'  📡 形式: {_clean(proto, 30)} / {_clean(mime, 40)}')
+            print(f'  ✅ ストリームURL取得成功 ({_clean(proto, 30)})')
+            return stream_url
 
-        # Step 3: transcoding URL → 実際のストリームURLへ解決
-        r2 = sess.get(tc_url,
-                      params={'client_id': client_id},
-                      timeout=12)
-        if r2.status_code != 200:
-            print(f'  ⚠ transcoding URL → HTTP {r2.status_code}')
-            return None
+        print('  ⚠ 再生できる形式が見つかりませんでした')
+        return None
 
-        stream_url = r2.json().get('url', '')
-        if not stream_url:
-            print('  ⚠ ストリームURLが空です')
-            return None
-
-        print(f'  ✅ ストリームURL取得成功 ({proto})')
-        return stream_url
-
+    except _DrmProtected:
+        raise
     except Exception as e:
-        print(f'  ⚠ API ストリームURL取得エラー: {e}')
+        print(f'  ⚠ API ストリームURL取得エラー: {_clean(e, 120)}')
         return None
 
 
@@ -468,67 +853,87 @@ def _resolve_stream_url(track_url: str,
     client_id が失効していた場合は自動更新して1回再試行する。
     両方失敗した場合のみ yt-dlp にフォールバック。
     """
-    # ① SoundCloud API（メイン・高速）
-    cid = _get_client_id()
-    if cid:
-        url = _resolve_via_sc_api(track_url, cid)
-        if url:
-            return url
+    track_url = _safe_media_url(track_url)
+    if not track_url:
+        return None
 
-        # API失敗 → client_idが失効した可能性。強制更新して再試行
-        print('  🔄 client_id を更新して再試行中...')
-        cid_new = _get_client_id(force_refresh=True)
-        if cid_new and cid_new != cid:
-            url = _resolve_via_sc_api(track_url, cid_new)
+    # ① SoundCloud API（メイン・高速）
+    try:
+        cid = _get_client_id()
+        if cid:
+            url = _resolve_via_sc_api(track_url, cid)
             if url:
-                print('  ✅ client_id 更新で再取得成功')
                 return url
-        print('  ⚠ SoundCloud API 失敗。yt-dlp にフォールバック...')
+
+            # API失敗 → client_idが失効した可能性。強制更新して再試行
+            print('  🔄 client_id を更新して再試行中...')
+            cid_new = _get_client_id(force_refresh=True)
+            if cid_new and cid_new != cid:
+                url = _resolve_via_sc_api(track_url, cid_new)
+                if url:
+                    print('  ✅ client_id 更新で再取得成功')
+                    return url
+            print('  ⚠ SoundCloud API 失敗。yt-dlp にフォールバック...')
+    except _DrmProtected:
+        # DRM 保護のみの曲: client_id の再取得も yt-dlp も無駄なので、すぐスキップする
+        print('  🔒 DRM 保護の曲のため再生できません（スキップします）')
+        return None
 
     # ② yt-dlp（フォールバック・タイムアウト20秒）
     try:
         cmd = ['yt-dlp', '-g', '--no-playlist', '-f', 'bestaudio/best',
                '--no-warnings']
-        if cookies_file and Path(cookies_file).exists():
-            cmd += ['--cookies', cookies_file]
-        cmd.append(track_url)
+        if cookies_file:
+            cpath = Path(str(cookies_file)).expanduser()
+            # Cookie はログイン情報そのもの。他人所有・リンク・緩い権限のファイルは使わない
+            if cpath.exists() and _ensure_private_file(cpath):
+                cmd += ['--cookies', str(cpath)]
+        cmd += ['--', track_url]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         if r.returncode == 0:
-            url = r.stdout.strip().split('\n')[0]
+            first = r.stdout.strip().split('\n')[0].strip()
+            url = _safe_stream_url(first)
             if url:
                 print(f'  ✅ yt-dlp ストリームURL取得成功')
                 return url
+            if first:
+                print('  ⚠ yt-dlp が返した配信元が許可されていないため、再生しません')
         if r.stderr.strip():
-            print(f'  ⚠ yt-dlp: {r.stderr.strip()[:150]}')
+            print(f'  ⚠ yt-dlp: {_clean(r.stderr.strip().split(chr(10))[0], 150)}')
     except subprocess.TimeoutExpired:
         print('  ⚠ yt-dlp タイムアウト')
     except Exception as e:
-        print(f'  ⚠ yt-dlp エラー: {e}')
+        print(f'  ⚠ yt-dlp エラー: {_clean(e, 120)}')
 
     return None
 
 
 def _get_track_info_ytdlp(track_url: str) -> Optional[dict]:
     """yt-dlp でトラックのメタデータを取得する（フル情報）。"""
+    track_url = _safe_media_url(track_url)
+    if not track_url:
+        return None
     cmd = ['yt-dlp', '--dump-json', '--no-playlist', '--no-warnings',
-           '--quiet', track_url]
+           '--quiet', '--', track_url]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
             lines = [l for l in r.stdout.strip().split('\n') if l.strip()]
             if lines:
                 item = json.loads(lines[0])
-                return {
-                    'url':       item.get('webpage_url', track_url),
-                    'id':        str(item.get('id', '')),
+                if not isinstance(item, dict):
+                    return None
+                return _sanitize_track({
+                    'url':       item.get('webpage_url') or track_url,
+                    'id':        item.get('id', ''),
                     'title':     item.get('title', ''),
                     'artist':    item.get('uploader', item.get('artist', '')),
                     'cover_url': _normalize_artwork(item.get('thumbnail', '')),
-                    'duration':  int(item.get('duration') or 0),
+                    'duration':  item.get('duration') or 0,
                     'genre':     item.get('genre', ''),
                     'likes':     item.get('like_count', 0),
                     'plays':     item.get('view_count', 0),
-                }
+                })
     except Exception:
         pass
     return None
@@ -549,10 +954,11 @@ def _ensure_requests() -> bool:
     try:
         import requests; return True
     except ImportError:
-        print('📦 requests をインストールします...')
-        r = subprocess.run([sys.executable, '-m', 'pip', 'install',
-                            '--user', '--quiet', 'requests'],
-                           capture_output=True)
+        cmd = [sys.executable, '-m', 'pip', 'install', '--user', '--quiet', 'requests']
+        if not _confirm_install('requests', cmd):
+            print('    手動でインストールする場合: pip install requests')
+            return False
+        r = subprocess.run(cmd, capture_output=True)
         return r.returncode == 0
 
 
@@ -565,17 +971,20 @@ _feh_hidden = False
 
 
 def _download_jacket(cover_url: str) -> Optional[str]:
-    if not cover_url:
+    """ジャケット画像を取得する。SoundCloud の画像ホストだけに限り、リダイレクトは1回ずつ検証し、
+    サイズ上限（8MB）と画像の種類を確認して、自分専用のフォルダーに保存する。"""
+    url = _safe_image_url(cover_url)
+    if not url:
+        return None
+    status, body = _fetch_limited(url, _ALLOWED_IMAGE_HOSTS, timeout=10,
+                                  max_bytes=_MAX_IMAGE_BYTES, content_type='image/')
+    if status != 200 or not body:
         return None
     try:
-        import requests
-        r = requests.get(cover_url, timeout=10, headers={'User-Agent': SC_AGENT})
-        if r.status_code == 200:
-            _JACKET_TMP.write_bytes(r.content)
-            return str(_JACKET_TMP)
+        _write_private(_JACKET_TMP, body)
+        return str(_JACKET_TMP)
     except Exception:
-        pass
-    return None
+        return None
 
 
 def _feh_hide():
@@ -703,28 +1112,62 @@ def _clear_now_playing():
 # お気に入り
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _sanitize_favorite(f) -> Optional[dict]:
+    """保存ファイルから読んだお気に入り 1 件を検証する（URL が許可外なら捨てる）。"""
+    t = _sanitize_track(f)
+    if not t:
+        return None
+    t['no']             = _as_int(f.get('no', 0), 0, 0, 10**9)
+    t['saved_at']       = _clean(f.get('saved_at', ''), 32)
+    t['audio_settings'] = f.get('audio_settings') if isinstance(f.get('audio_settings'), dict) else {}
+    return t
+
+
 def _load_favorites() -> List[dict]:
     try:
-        return json.loads(FAVS_PATH.read_text()) if FAVS_PATH.exists() else []
+        raw = json.loads(FAVS_PATH.read_text()) if FAVS_PATH.exists() else []
     except Exception:
         return []
+    if not isinstance(raw, list):
+        return []
+    return [x for x in (_sanitize_favorite(f) for f in raw) if x]
 
 def _save_favorites(favs: List[dict]):
-    FAVS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    FAVS_PATH.write_text(json.dumps(favs, ensure_ascii=False, indent=2))
+    _write_private(FAVS_PATH, json.dumps(favs, ensure_ascii=False, indent=2))
 
 
 # ─── 保存済みプレイリスト ──────────────────────────────────────────────────
 
+def _sanitize_playlist(p) -> Optional[dict]:
+    """保存ファイルから読んだプレイリスト 1 件を検証する（許可外 URL の曲は捨てる）。"""
+    if not isinstance(p, dict):
+        return None
+    raw_tracks = p.get('tracks') if isinstance(p.get('tracks'), list) else []
+    tracks = [x for x in (_sanitize_track(t) for t in raw_tracks[:2000]) if x]
+    name = _clean(p.get('name', ''), 80)
+    if not name:
+        return None
+    return {
+        'no':             _as_int(p.get('no', 0), 0, 0, 10**9),
+        'name':           name,
+        'tracks':         tracks,
+        'count':          len(tracks),
+        'saved_at':       _clean(p.get('saved_at', ''), 32),
+        'audio_settings': p.get('audio_settings') if isinstance(p.get('audio_settings'), dict) else {},
+    }
+
+
 def _load_playlists() -> List[dict]:
     try:
-        return json.loads(PLAYLISTS_PATH.read_text()) if PLAYLISTS_PATH.exists() else []
+        raw = json.loads(PLAYLISTS_PATH.read_text()) if PLAYLISTS_PATH.exists() else []
     except Exception:
         return []
+    if not isinstance(raw, list):
+        return []
+    return [x for x in (_sanitize_playlist(p) for p in raw) if x]
 
 def _save_playlists(pls: List[dict]):
-    PLAYLISTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PLAYLISTS_PATH.write_text(json.dumps(pls, ensure_ascii=False, indent=2))
+    _write_private(PLAYLISTS_PATH, json.dumps(pls, ensure_ascii=False, indent=2))
 
 def _save_current_queue_as_playlist(tracks: List[dict], name: str,
                                      state: Optional[dict] = None) -> bool:
@@ -732,7 +1175,9 @@ def _save_current_queue_as_playlist(tracks: List[dict], name: str,
     state が渡された場合は音響設定（filter_preset / gain_preset / volume /
     air_layer / musikverein_room_effects）も一緒に保存する。
     """
-    if not tracks or not name.strip():
+    name = _clean(name, 80)
+    tracks = [x for x in (_sanitize_track(t) for t in (tracks or [])[:2000]) if x]
+    if not tracks or not name:
         return False
     pls = _load_playlists()
     nos = [p.get('no', 0) for p in pls if isinstance(p.get('no'), int)]
@@ -829,12 +1274,7 @@ def _playlists_flow(build_filter_func, state: dict):
     # ── 保存済み音響設定を state へ適用 ──
     audio = pl.get('audio_settings', {})
     if audio:
-        state['filter_preset']            = audio.get('filter_preset', state.get('filter_preset', 'musikverein'))
-        state['gain_preset']              = audio.get('gain_preset',   state.get('gain_preset',   'classical'))
-        state['volume']                   = audio.get('volume',        state.get('volume',        12))
-        state['air_layer']                = audio.get('air_layer',     state.get('air_layer',     True))
-        state['musikverein_room_effects'] = audio.get('musikverein_room_effects',
-                                                      state.get('musikverein_room_effects', True))
+        _apply_audio_settings(state, audio)
         fp_lbl  = FILTER_PRESET_LABELS.get(state['filter_preset'], state['filter_preset'])
         gp_db   = GAIN_PRESETS_DB.get(state['gain_preset'], 0.0)
         apl_str = '🌿 ON' if state['air_layer'] else 'OFF'
@@ -981,16 +1421,16 @@ def _play_one(track: dict, build_filter_func, state: dict,
     current_queue が渡された場合は [P] キーでプレイリスト保存が可能。
     戻り値: 'next' | 'prev' | 'quit' | 'restart'
     """
-    url = track.get('url', '')
+    url = _safe_media_url(track.get('url', ''))
     if not url:
-        print('  ⚠ URL が空です。スキップします。')
+        print('  ⚠ URL が空、または対応していない URL です。スキップします。')
         return 'next'
 
     print(f'\n  ⏳ ストリームURL取得中...')
     cfg = _load_config()
     stream_url = _resolve_stream_url(url, cookies_file=cfg.get('cookies_file'))
     if not stream_url:
-        print(f'  ⚠ 「{track.get("title", url[:60])}」のストリームURLを取得できません。スキップします。')
+        print(f'  ⚠ 「{_clean(track.get("title") or url[:60], 80)}」のストリームURLを取得できません。スキップします。')
         return 'next'
 
     # フィルターチェーン構築（Qobuzと同じ引数順序・戻り値形式）
@@ -1012,11 +1452,29 @@ def _play_one(track: dict, build_filter_func, state: dict,
     finally:
         _qji.current_filter_preset = _prev_fp
 
+    # ★★★ ピークモニターGUI用ログ出力: SoundCloud再生でも有効化 ★★★
+    # （qji_ytmusic.py / qji.py 本体と同じ astats+ametadata パススルー方式。音声そのものには影響しない）
+    # ログの場所は、本体のピークモニターが決め打ちで読む /tmp/qji_declip_<PID>.log（変更しない）。
+    # 逐次再生なので、曲ごとに os.remove() して作り直す方式で安全。
+    try:
+        _sc_declip_log_path = f'/tmp/qji_declip_{os.getpid()}.log'
+        if os.path.exists(_sc_declip_log_path):
+            os.remove(_sc_declip_log_path)
+        filter_args = _qji._wrap_filter_args_with_declip_monitor(filter_args, _sc_declip_log_path)
+    except Exception:
+        pass
+
     state['fmt_name'] = 'SoundCloud MP3'
 
     # ffmpeg コマンド（Qobuzと同じ構成）
-    # SoundCloud MP3 は 44100Hz 固定
-    SC_SAMPLE_RATE = 44100
+    # 直結出力: SoundCloud MP3 のネイティブ 44100Hz のまま。
+    # DSP モード: CamillaDSP / aplay が常に 48000Hz 前提のため、ffmpeg 側で 48000Hz に変換して渡す
+    #   （44100Hz のデータを 48000Hz として再生すると、約1.088倍の速さ＝音が高くなる）。
+    #   qji.py 本体の他の再生経路と同じ「DSP なら 48000」方式。
+    _dsp_on = bool(getattr(_qji, 'dsp_mode_active', False))
+    SC_SAMPLE_RATE = 48000 if _dsp_on else 44100
+    if _dsp_on:
+        print('  🔊 DSPモード: 出力 48000Hz')
     cmd_ff = (
         ['ffmpeg', '-loglevel', 'warning',
          '-fflags', 'nobuffer',
@@ -1024,6 +1482,8 @@ def _play_one(track: dict, build_filter_func, state: dict,
          '-reconnect_streamed',         '1',
          '-reconnect_on_network_error', '1',
          '-reconnect_delay_max',        '5',
+         # URL の中身が何であっても、ffmpeg が file: などローカルのものを読まないようにする
+         '-protocol_whitelist',         'https,tls,tcp,crypto',
          '-i', stream_url,
          '-vn', '-ar', str(SC_SAMPLE_RATE), '-acodec', 'pcm_s32le']
         + filter_args
@@ -1042,9 +1502,12 @@ def _play_one(track: dict, build_filter_func, state: dict,
     _update_now_playing(track, state, elapsed=int(start_at))
 
     # ★ ffmpegのエラーをファイルに保存（rawモード中でも消えないように）
-    _errlog = Path(tempfile.gettempdir()) / 'qji_sc_ffmpeg.log'
+    #   共有の /tmp ではなく自分専用のフォルダーに、権限600・リンクは辿らずに作る
+    _errlog = _private_dir() / 'qji_sc_ffmpeg.log'
     try:
-        _ferr = open(_errlog, 'w')
+        _ferr = os.fdopen(os.open(str(_errlog),
+                                  os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0),
+                                  0o600), 'w')
         # Qobuzと同じ接続順序: p_ff.stdout=PIPE → p_ap.stdin=p_ff.stdout
         p_ff = subprocess.Popen(cmd_ff, stdout=subprocess.PIPE, stderr=_ferr)
         p_ap = subprocess.Popen(cmd_ap, stdin=p_ff.stdout,      stderr=subprocess.DEVNULL)
@@ -1058,7 +1521,8 @@ def _play_one(track: dict, build_filter_func, state: dict,
 
     result = _key_loop(p_ff, p_ap, track, state,
                        play_start=time.time(), start_at=start_at,
-                       build_filter_func=build_filter_func)
+                       build_filter_func=build_filter_func,
+                       current_queue=current_queue)
 
     # ★ key_loop終了後にffmpegエラーを必ず表示（\rで消えない）
     try:
@@ -1066,7 +1530,7 @@ def _play_one(track: dict, build_filter_func, state: dict,
         if err_text:
             print(f'\n  🔴 ffmpeg ログ:')
             for line in err_text.split('\n')[:20]:
-                print(f'     {line}')
+                print(f'     {_clean(line, 200)}')
             print()
     except Exception:
         pass
@@ -1080,7 +1544,8 @@ def _dur_str(sec: int) -> str:
 
 def _key_loop(p_ff, p_ap, track: dict, state: dict,
               play_start: float, start_at: float,
-              build_filter_func) -> str:
+              build_filter_func,
+              current_queue: Optional[List[dict]] = None) -> str:
     """
     再生中のキー入力ループ。ffmpeg / aplay が終了するか
     ナビゲーションキーが押されると終了する。
@@ -1267,14 +1732,16 @@ def _url_flow(build_filter_func, state: dict):
     url = _sc_readline('\n  🔗 SoundCloud URL を入力: ')
     if not url:
         return
-    if 'soundcloud.com' not in url:
-        print('  ⚠ SoundCloud の URL を入力してください')
+    url = _safe_media_url(url)
+    if not url:
+        print('  ⚠ SoundCloud（soundcloud.com）の URL を入力してください')
         return
 
-    is_playlist = ('/sets/' in url
-                   or '/likes' in url
-                   or '/reposts' in url
-                   or '/tracks' in url)
+    _path = _urlparse(url).path
+    is_playlist = ('/sets/' in _path
+                   or '/likes' in _path
+                   or '/reposts' in _path
+                   or '/tracks' in _path)
     if is_playlist:
         print(f'  📋 プレイリストを取得中...')
         tracks = get_playlist_tracks(url)
@@ -1290,7 +1757,7 @@ def _url_flow(build_filter_func, state: dict):
             track = info
         else:
             # 最低限の情報で再生を試みる
-            track = {'url': url, 'title': url.split('/')[-1],
+            track = {'url': url, 'title': _clean(_urlparse(url).path.rstrip('/').split('/')[-1], 80),
                      'artist': '', 'cover_url': '', 'duration': 0}
         _apply_auto_preset(track, state)
         while True:
@@ -1311,7 +1778,7 @@ def _search_flow(build_filter_func, state: dict, client_id: str):
         print('  ⚠ 検索結果がありません')
         return
 
-    print(f'\n  🎵 検索結果: 「{query}」')
+    print(f'\n  🎵 検索結果: 「{_clean(query, 80)}」')
     for i, t in enumerate(tracks, 1):
         dur = f' [{_dur_str(t["duration"])}]' if t.get('duration') else ''
         genre = f' [{t["genre"]}]' if t.get('genre') else ''
@@ -1368,15 +1835,7 @@ def _favorites_flow(build_filter_func, state: dict):
     }
     audio = fav.get('audio_settings', {})
     if audio:
-        state.update({
-            'gain_preset':   audio.get('gain_preset',   state.get('gain_preset')),
-            'filter_preset': audio.get('filter_preset', state.get('filter_preset')),
-            'air_layer':     audio.get('air_layer',     state.get('air_layer')),
-            'volume':        audio.get('volume',        state.get('volume')),
-            'echo_mode':     audio.get('echo_mode',     state.get('echo_mode')),
-            'tinnitus':      audio.get('tinnitus',      state.get('tinnitus')),
-            'musikverein':   audio.get('musikverein',   state.get('musikverein')),
-        })
+        _apply_audio_settings(state, audio)    # 許可した項目・範囲だけ反映
         state['manual_preset_locked'] = True   # 保存時の設定を優先
     while True:
         result = _play_one(track, build_filter_func, state)
@@ -1385,40 +1844,30 @@ def _favorites_flow(build_filter_func, state: dict):
 
 
 def _handle_browser_request(build_filter_func, state: dict, req: dict):
-    """ブラウザUI からのリクエストを処理する。"""
+    """ブラウザUI からのリクエストを処理する。中身は信用せず、検証してから使う。"""
     _restore_terminal()   # 再生後 rawモードが残留している場合に備えて
+    if not isinstance(req, dict):
+        print('  ⚠ 不正なリクエストです')
+        return
     req_type = req.get('type', 'track')
 
     if req_type == 'playlist':
         # プレイリスト再生
-        tracks = req.get('tracks', [])
+        raw = req.get('tracks', [])
+        tracks = [x for x in (_sanitize_track(t) for t in (raw if isinstance(raw, list) else [])[:500]) if x]
         if not tracks:
-            print('  ⚠ プレイリストが空です')
+            print('  ⚠ プレイリストが空です（または対応していない URL です）')
             return
-        start = max(0, req.get('start_from', 1) - 1)
+        start = _as_int(req.get('start_from', 1), 1, 1, len(tracks)) - 1
         print(f'\n  📋 プレイリスト再生: {len(tracks)}曲 #{start + 1}曲目から')
         _play_list(tracks, start, build_filter_func, state)
     else:
         # 単曲再生
-        track = {
-            'url':       req.get('url', ''),
-            'title':     req.get('title', ''),
-            'artist':    req.get('artist', ''),
-            'cover_url': req.get('cover_url', ''),
-            'duration':  req.get('duration', 0),
-            'genre':     req.get('genre', ''),
-        }
-        if not track['url']:
-            print('  ⚠ URL がありません')
+        track = _sanitize_track(req)
+        if not track:
+            print('  ⚠ URL がありません（または対応していない URL です）')
             return
-        audio = req.get('audio_settings', {})
-        if audio:
-            state.update({
-                'gain_preset':   audio.get('gain_preset',   state['gain_preset']),
-                'filter_preset': audio.get('filter_preset', state['filter_preset']),
-                'air_layer':     audio.get('air_layer',     state['air_layer']),
-                'volume':        audio.get('volume',        state['volume']),
-            })
+        _apply_audio_settings(state, req.get('audio_settings', {}))
         _apply_auto_preset(track, state)
         print(f'\n  📱 ブラウザ再生: {track["artist"]} — {track["title"]}')
         # c/s キーで restart が返った場合は同じ曲を新設定で再再生
@@ -1479,7 +1928,7 @@ def run(build_filter_func, gain_preset: str, tinnitus: bool,
         import qji_soundcloud_browser as _browser
         _browser.start_browser_server(open_browser=False)
         _browser_available = True
-        _open_incognito_browser('http://localhost:8081')
+        _open_incognito_browser(BROWSER_URL)
     except ImportError:
         pass
 
@@ -1498,7 +1947,7 @@ def run(build_filter_func, gain_preset: str, tinnitus: bool,
                   f'  APL:{apl}  Vol:{state["volume"]}dB')
             print(f'  お気に入り    : {favs_count} 件  / 保存プレイリスト: {pl_count} 件')
             if _browser_available:
-                print(f'  ブラウザUI    : http://localhost:8081')
+                print(f'  ブラウザUI    : {BROWSER_URL}')
             print()
             print('  u : 🔗 URL を貼り付けて再生')
             print('  k : 🔍 キーワード検索（ターミナル）')
@@ -1595,7 +2044,7 @@ def run(build_filter_func, gain_preset: str, tinnitus: bool,
                 _restore_terminal()
             elif ch == 'v':
                 if _browser_available:
-                    _open_incognito_browser('http://localhost:8081')
+                    _open_incognito_browser(BROWSER_URL)
                 else:
                     print('  ⚠ qji_soundcloud_browser.py が見つかりません')
             elif ch == 'r':
