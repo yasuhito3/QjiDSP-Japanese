@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================
 #  QjiDSP インストーラー v2
-#  Qji + CamillaDSP による3D音響空間拡張システム（音場 v1〜v6 対応）
+#  Qji + CamillaDSP による3D音響空間拡張システム（音場 v1〜v8 対応）
 #  ★ ~/qji/ フォルダーへ Qji本体一式 + DSP関連ファイルをまとめて導入します。
 # =============================================================
 
@@ -44,7 +44,7 @@ banner() {
     echo -e "${CYAN}${BOLD}"
     echo "  ╔══════════════════════════════════════════╗"
     echo "  ║       🎛️  QjiDSP インストーラー           ║"
-    echo "  ║   3D空間音響拡張 for Qji 奏在（音場 v1〜v6）║"
+    echo "  ║   3D空間音響拡張 for Qji 奏在（音場 v1〜v8）║"
     echo "  ╚══════════════════════════════════════════╝"
     echo -e "${RESET}"
 }
@@ -77,7 +77,7 @@ echo "  2. Pythonライブラリ／yt-dlp[default]の更新（YouTube Music再�
 echo "  3. CamillaDSP本体のインストール"
 echo "  4. deno（YouTube Music再生の安定化に使用）のインストール"
 echo "  5. 仮想サウンドカード(snd-aloop)の設定"
-echo "  6. ${QJI_DIR}/ へQji本体一式＋DSP関連ファイル（音場v1〜v6）を配置"
+echo "  6. ${QJI_DIR}/ へQji本体一式＋DSP関連ファイル（音場v1〜v8・音場プリセット）を配置"
 echo "  7. 既存ファイルをDSP対応版に更新（旧版は自動バックアップ）"
 echo "  8. USB出力デジタルノイズ対策（USB-Noise-Guard）のセットアップ（任意・root権限）"
 echo ""
@@ -257,7 +257,7 @@ fi
 step "Qji本体＋QjiDSPファイルの配置（${QJI_DIR}/ 配下）"
 
 mkdir -p "$QJI_DIR/camilladsp_test"
-for v in 1 2 3 4 5 6; do
+for v in 1 2 3 4 5 6 7 8; do
     mkdir -p "$QJI_DIR/qjidsp_backup_v${v}"
 done
 
@@ -274,15 +274,38 @@ cp "$SCRIPT_DIR/wobble_v5_harmonics.py" "$QJI_DIR/camilladsp_test/wobble_v5_harm
 cp "$SCRIPT_DIR/cdsp_watchdog.py" "$QJI_DIR/camilladsp_test/cdsp_watchdog.py"
 ok "IR/wobble/watchdogファイルを配置しました"
 
+# ★ 音場 v7（倍音ホールモード）／v8（実態感ホール）と、音場プリセット（再生中の[e]キー）
+#   wobble_v7.py / wobble_v8.py は、揺らぎ・音量連動のために qji_field_ctl.py を
+#   「自分と同じフォルダー」から読み込む。そのため qji_field_ctl.py は必ず
+#   camilladsp_test/ に置く（Qji本体もここから読み込む）。
+#   配布ファイル名は qji_field_ctl.py だが、qji_field_ctl_jp.py という名前でも受け付ける。
+cp "$SCRIPT_DIR/wobble_v7.py" "$QJI_DIR/camilladsp_test/"
+cp "$SCRIPT_DIR/wobble_v8.py" "$QJI_DIR/camilladsp_test/"
+FIELD_SRC=""
+for _cand in qji_field_ctl.py qji_field_ctl_jp.py; do
+    if [ -f "$SCRIPT_DIR/$_cand" ]; then FIELD_SRC="$SCRIPT_DIR/$_cand"; break; fi
+done
+if [ -n "$FIELD_SRC" ]; then
+    FIELD_DST="$QJI_DIR/camilladsp_test/qji_field_ctl.py"
+    if [ -f "$FIELD_DST" ] && ! cmp -s "$FIELD_SRC" "$FIELD_DST"; then
+        cp "$FIELD_DST" "${FIELD_DST}.bak_$(date +%Y%m%d_%H%M%S)"
+        ok "既存の qji_field_ctl.py をバックアップしました"
+    fi
+    cp "$FIELD_SRC" "$FIELD_DST"
+    ok "音場プリセット(qji_field_ctl.py)・wobble_v7/v8 を配置しました"
+else
+    warn "qji_field_ctl.py が同梱パッケージに見つかりません。音場プリセット([e]キー)と v7/v8 の揺らぎは使えません。"
+fi
+
 # yamlファイル：IR(wav)ファイルのパスをホームディレクトリ非依存の {HOME} プレースホルダーに
 # 変換してから配置する（qji.py起動時に {HOME} を実ホームパスへ自動展開する仕様のため）。
 # ★ v5/v6のymlはCRLF改行が混入していたため、念のためLFへ統一しておく。
-for v in 1 2 3 4 5 6; do
+for v in 1 2 3 4 5 6 7 8; do
     sed -E 's#/home/[^/"]+/camilladsp_test#{HOME}/camilladsp_test#g' \
         "$SCRIPT_DIR/spatial_final_v${v}.yml" | tr -d '\r' \
         > "$QJI_DIR/qjidsp_backup_v${v}/spatial_final.yml"
 done
-ok "DSP設定ファイル(v1〜v6)を配置しました"
+ok "DSP設定ファイル(v1〜v8)を配置しました"
 
 # --- Qji本体モジュール一式（既存があればタイムスタンプ付きでバックアップしてから上書き） ---
 backup_and_install() {
@@ -328,7 +351,7 @@ fi
 
 # ★ qji.py内のDSP関連パス（camilladsp_test配下／qjidsp_backup_vN配下）は
 #   os.path.expanduser("~") をそのまま使っているため、~/qji/ 配下に統一する場合は
-#   qji/ を挟み込むよう書き換える。（音場v1〜v6・wobble・watchdog全パス対応）
+#   qji/ を挟み込むよう書き換える。（音場v1〜v8・wobble・watchdog全パス対応）
 python3 - "$QJI_DIR" << 'PYEOF'
 import sys
 qji_dir = sys.argv[1]
@@ -482,7 +505,7 @@ fi
 # -------------------------------------------------------------
 step "動作確認"
 
-for pyfile in qji.py qji_qobuzdsp.py qji_qobuz_browser.py qji_soundcloud.py qji_soundcloud_browser.py qji_ytmusic.py qji_ytmusic_browser.py usb_noise_guard.py; do
+for pyfile in camilladsp_test/qji_field_ctl.py camilladsp_test/wobble_v7.py camilladsp_test/wobble_v8.py qji.py qji_qobuzdsp.py qji_qobuz_browser.py qji_soundcloud.py qji_soundcloud_browser.py qji_ytmusic.py qji_ytmusic_browser.py usb_noise_guard.py; do
     if [ -f "$QJI_DIR/$pyfile" ]; then
         python3 -c "import ast; ast.parse(open('$QJI_DIR/$pyfile').read())" \
             && ok "$pyfile 構文チェックOK" \
@@ -490,7 +513,7 @@ for pyfile in qji.py qji_qobuzdsp.py qji_qobuz_browser.py qji_soundcloud.py qji_
     fi
 done
 
-for v in 1 2 3 4 5 6; do
+for v in 1 2 3 4 5 6 7 8; do
     if camilladsp "$QJI_DIR/qjidsp_backup_v${v}/spatial_final.yml" --check >/dev/null 2>&1; then
         ok "spatial_final_v${v}.yml 構文チェックOK"
     else
@@ -500,6 +523,27 @@ done
 
 python3 -c "import camilladsp; print('  pycamilladsp 動作確認OK')" 2>/dev/null || \
     warn "pycamilladsp のインポートに失敗しました"
+
+# ★ 音場v7/v8は、Auxフェーダー（Volumeフィルター）を再生中に動かします。
+#   古いCamillaDSP／pycamilladspだと、v7/v8の設定が読めない・揺らぎが動かないことがあります。
+#   CamillaDSP側は、上の spatial_final_v7/v8.yml の構文チェックが通っていれば問題ありません。
+#   pycamilladsp側は、フェーダー番号つきの set_volume(引数2つ) に対応しているかを確認します。
+#   （判定できない場合は何も言いません）
+PYCDSP_RC=0
+python3 - << 'PYEOF' 2>/dev/null || PYCDSP_RC=$?
+import inspect, sys
+try:
+    from camilladsp import CamillaClient
+    c = CamillaClient("127.0.0.1", 1)
+    n = len(inspect.signature(c.volume.set_volume).parameters)
+    sys.exit(0 if n >= 2 else 2)
+except Exception:
+    sys.exit(0)
+PYEOF
+if [ "$PYCDSP_RC" -eq 2 ]; then
+    warn "pycamilladsp が古い可能性があります（v7/v8の揺らぎ・音量連動に必要なフェーダー指定に未対応）。"
+    warn "  次を実行して更新してください: pip install -U \"git+https://github.com/HEnquist/pycamilladsp.git\" $PIP_FLAGS"
+fi
 
 command -v yt-dlp >/dev/null 2>&1 && ok "yt-dlp 動作確認OK: $(yt-dlp --version)" || warn "yt-dlpが見つかりません"
 command -v deno >/dev/null 2>&1 && ok "deno 動作確認OK: $(deno --version | head -n1)" || warn "denoが見つかりません（ターミナル再起動後に再確認してください）"
@@ -517,10 +561,14 @@ echo "    既存のQjiデスクトップアイコンからそのまま起動で�
 echo "    （手動の場合: cd ${QJI_DIR} && python3 qji.py）"
 echo ""
 echo "  起動後、出力デバイスで「Loopback」を選択すると、"
-echo "  6つの3D音響モード（v1〜v6）を選べるようになります。"
+echo "  8つの3D音響モード（v1〜v8）を選べるようになります。"
 echo "    1) 濃厚ホール（静）　2) 濃厚ホール（動）"
 echo "    3) 素材の味（静）　　4) 素材の味（動）"
 echo "    5) 倍音モード　　　　6) 倍音モード（ヘッドホン用）"
+echo "    7) 倍音ホールモード　8) 実態感ホール"
+echo ""
+echo "  再生中の [e] キーで「音場プリセット」を使えます（ヴァイオリンを美しく・声を前に・揺らぎ・音量連動 など）。"
+echo "  音場 v7 / v8 では、揺らぎと音量連動も働きます。"
 echo ""
 echo "  ご使用のDAC（オーディオインターフェース）は、"
 echo "  DSPモード選択後に自動検出・選択できます。"

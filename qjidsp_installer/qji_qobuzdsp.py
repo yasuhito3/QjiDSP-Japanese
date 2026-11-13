@@ -7,7 +7,7 @@ qji.py から Q キーで呼び出される。
   [n]次  [b]前  [q]メニューへ
   [g]ゲイン切替  [G]ギャップレス ON/OFF  [w]APL ON/OFF  [c]プリセット選択
   [+]/[=]音量+1dB  [-]音量-1dB
-  [0] DSPバイパス(素通し)ON/OFF  [1]〜[6] DSP音場切替（DSPモード時のみ。qji.py の関数を使用）
+  [0] DSPバイパス(素通し)ON/OFF  [1]〜[8] DSP音場切替（DSPモード時のみ。qji.py の関数を使用）
   [u]/[k]/[j] USBノイズ対策の切替（全体/オートサスペンド/RT優先度）  [m] 状態表示（yでも可。qji.py の関数を使用）
   [s]音響設定を保存
 """
@@ -87,11 +87,11 @@ def _is_dsp_mode_active() -> bool:
 
 def _switch_dsp_venue_via_main(key: str) -> Optional[bool]:
     """
-    呼び出し元(qji.py = __main__)の switch_dsp_venue() で DSP音場(v1〜v6)を切り替える。
+    呼び出し元(qji.py = __main__)の switch_dsp_venue() で DSP音場(V1〜V8)を切り替える。
     戻り値: True=切替成功 / False=失敗 / None=すでにその音場（何もしていない）
     """
     main_mod = sys.modules.get('__main__')
-    # [0] = DSPバイパス(素通し)のON/OFF、[1]〜[6] = 音場切替
+    # [0] = DSPバイパス(素通し)のON/OFF、[1]〜[8] = 音場切替
     fn = getattr(main_mod, 'toggle_dsp_bypass' if key == '0' else 'switch_dsp_venue', None)
     if not callable(fn):
         print('  ⚠ DSP切替関数が見つかりません（qji.py から起動していますか？）')
@@ -127,6 +127,179 @@ def _usb_guard_action(key: str) -> None:
         elif new_state is False:
             print(f'\n🔌 {labels[key]}: OFF')
     print(f'🔌 USBノイズ対策の現状: {_usb_guard_summary_via_main()}  (AS=オートサスペンド対策 / RT=リアルタイム優先度)')
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ★ 音場プリセット([e]→...) Qobuz対応
+#   qji.py(__main__) の _qjifield (qji_field_ctl.py) をそのまま使う。
+#   ・揺らぎ/音量連動/広く・近く: 制御ファイル経由でwobbleへ即時反映(再生元に依存しない)
+#   ・楽器EQ(ヴァイオリンを美しく等): ffmpegのeq_partへ合成 → 次の曲、または [r] 再読込から反映
+#   ・曲/アルバムの記憶: Qobuzの曲には実ファイルパスが無いので擬似パス qobuz/<アルバム名>/<曲ID> で記憶
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _field_mod():
+    """qji.py(__main__) の _qjifield を返す。無ければ None。"""
+    try:
+        return getattr(sys.modules.get('__main__'), '_qjifield', None)
+    except Exception:
+        return None
+
+
+def _field_track_dict(t: dict) -> dict:
+    """Qobuzの曲情報を on_track_start() が受け取れる形(擬似パス付き)にする。"""
+    def _safe(x):
+        x = re.sub(r'[\\/:\x00-\x1f]+', '_', str(x or '')).strip(' .')
+        return x[:80] or 'unknown'
+    album = _safe(t.get('album')) if t.get('album') else 'single'
+    tid = _safe(t.get('track_id'))
+    return {
+        'path':      f'qobuz/{album}/{tid}',
+        'title':     t.get('title', '') or '',
+        'album':     t.get('album', '') or '',
+        'performer': t.get('artist', '') or '',
+        'composer':  '',
+        'genre':     '',
+        'filename':  '',
+    }
+
+
+# ── Sonia Intelligence ([x] 音響プリセットメニュー) Qobuz対応 ─────────────────────
+#   SIの補正値は _si_instance.current_params.eq に溜まり、楽器EQと同じ eq_part へ合成される。
+#   Qobuzの曲はSIの曲解析(ローカルファイル前提)を通らないので、新しい曲の頭で中立(EQなし)に戻し、
+#   前に聴いたローカル曲のEQが混ざらないようにする。同じ曲の再読込中は[x]の調整を保つ。
+_si_last_tid = {'tid': None}
+
+
+def _si_obj():
+    """qji.py(__main__) の SI インスタンス。SIが無効なら None。"""
+    try:
+        m = sys.modules.get('__main__')
+        if not getattr(m, 'SI_AVAILABLE', False):
+            return None
+        return getattr(m, '_si_instance', None)
+    except Exception:
+        return None
+
+
+def _si_reset_for_track(t: dict, force: bool = False) -> None:
+    si = _si_obj()
+    if si is None:
+        return
+    tid = t.get('track_id')
+    if not force and _si_last_tid['tid'] == tid and getattr(si, 'current_params', None) is not None:
+        return   # 同じ曲の再読込: [x]で調整した値を保つ
+    _si_last_tid['tid'] = tid
+    try:
+        from filter_builder import params_from_preset
+        p = params_from_preset('default')
+        if hasattr(p, 'eq'):
+            p.eq = {}            # Qobuzの既定の音は変えない(EQは[x]で足したぶんだけ)
+        si.current_params = p
+    except Exception:
+        cp = getattr(si, 'current_params', None)
+        if cp is not None and hasattr(cp, 'eq'):
+            try:
+                cp.eq = {}
+            except Exception:
+                pass
+
+
+def _si_menu_action(state: dict) -> bool:
+    """[x] 押下時(rawモード中・リスナースレッドから呼ぶ)。qji.py本体の音響プリセットメニューをそのまま開く。
+    戻り値: メニューを開いたなら True(→今の曲を頭から再生し直して反映)。"""
+    si = _si_obj()
+    fn = getattr(sys.modules.get('__main__'), '_si_do_preset_menu', None)
+    if si is None or not callable(fn):
+        sys.stdout.write('\r\n  ⚠ Sonia Intelligence が使えません([x]は SI 有効時のみ)\r\n')
+        sys.stdout.flush()
+        return False
+    t = state.get('current_track') or {}
+    if getattr(si, 'current_params', None) is None:
+        _si_reset_for_track(t, force=True)
+    if getattr(si, 'current_params', None) is None:
+        sys.stdout.write('\r\n  ⚠ SIのパラメータを初期化できませんでした\r\n')
+        sys.stdout.flush()
+        return False
+    try:
+        fn()   # メニュー表示→番号入力→適用(/dev/tty で入力し、終了時にrawへ戻る)
+    except Exception as e:
+        sys.stdout.write(f'\r\n  ⚠ SIメニューエラー: {e}\r\n')
+        sys.stdout.flush()
+        return False
+    # 確定したSIのEQを、この曲(Qobuzの擬似パス)のあいだの確定値として覚える(再読込で打ち消されない)
+    try:
+        fc = _field_mod()
+        if fc is not None and t:
+            fc.set_si_eq_override(_field_track_dict(t)['path'],
+                                  dict(getattr(si.current_params, 'eq', None) or {}))
+    except Exception:
+        pass
+    return True
+
+
+def _field_on_track_start(t: dict, state: dict) -> None:
+    """曲の開始時(フィルターを組み立てる前)に呼ぶ。記憶 > 曲名ルール > 音場別の既定 の順で設定を決める。"""
+    fc = _field_mod()
+    if fc is None:
+        return
+    try:
+        _si_reset_for_track(t)
+        main_mod = sys.modules.get('__main__')
+        fc.on_track_start(
+            _field_track_dict(t), _si_obj(), say=print,
+            context={'dsp': _is_dsp_mode_active(),
+                     'venue': getattr(main_mod, 'current_dsp_venue', None),
+                     'filter_preset': state.get('filter_preset', 'musikverein')})
+    except Exception as e:
+        print(f'  ⚠ 音場プリセット適用エラー: {e}')
+
+
+def _field_scene_eq_str() -> str:
+    """現在の音場プリセットの楽器EQを、eq_part用の文字列(末尾カンマ付き)で返す。無ければ ''。"""
+    fc = _field_mod()
+    if fc is None:
+        return ''
+    try:
+        fn = getattr(sys.modules.get('__main__'), '_si_get_eq_filters', None)
+        if not callable(fn):
+            return ''
+        si = _si_obj()
+        eq = fn(fc.params_with_scene(getattr(si, 'current_params', None) if si else None))
+        return (eq + ',') if eq else ''
+    except Exception:
+        return ''
+
+
+def _field_key_action(state: dict) -> bool:
+    """[e] 押下時(rawモード中に呼ぶ)。次のキーを待って音場プリセットを適用する。
+    戻り値: 記憶できた(ジャケット表示へ戻す)なら True。"""
+    fc = _field_mod()
+    if fc is None:
+        print('\r\n  ⚠ qji_field_ctl.py が見つかりません(~/qji/camilladsp_test/ に置くか、QjiDSPインストーラーで導入してください)\r')
+        return False
+
+    def _say(msg=''):
+        # rawモード中でも階段状にならないよう CRLF にして出力する
+        sys.stdout.write(str(msg).replace('\r\n', '\n').replace('\n', '\r\n') + '\r\n')
+        sys.stdout.flush()
+
+    try:
+        if not _is_dsp_mode_active():
+            _say('\nℹ️ DSPモードではないため、揺らぎ側は効きません(楽器EQのみ)')
+        elif getattr(sys.modules.get('__main__'), 'current_dsp_venue', None) not in ('7', '8'):
+            _say('\nℹ️ 現在はV7/V8ではないため、揺らぎ側は反映されません([7]または[8]でV7/V8へ)')
+        eq_changed = fc.handle_two_stage_key(_si_obj(), say=_say)
+        if eq_changed:
+            _say('   ℹ️ Qobuzでは [r] で今の曲を頭から再生し直すと、楽器EQがすぐ反映されます')
+        saved = False
+        try:
+            saved = bool(fc.consume_saved())
+        except Exception:
+            pass
+        return saved
+    except Exception as e:
+        _say(f'\n⚠ 音場プリセットエラー: {e}')
+        return False
+
 
 _incognito_proc: Optional[subprocess.Popen] = None
 _incognito_tmp_dir: Optional[str] = None
@@ -490,6 +663,7 @@ def _download_jacket(cover_url: str) -> Optional[str]:
 # feh プロセス（デスクトップ表示用）
 _feh_proc      = None
 _feh_hidden    = False   # ESC で非表示にした状態
+_feh_composite_active = False   # feh が「曲情報付き合成画像ファイル」を --reload 付きで表示中か
 
 # プレイリスト再生状態（ブラウザUIへのポーリング用）
 _PLAYLIST_STATUS: dict = {
@@ -505,7 +679,7 @@ _PLAYLIST_STATUS: dict = {
 
 def _feh_hide():
     """feh を終了して画像を非表示にする（ESC キー）"""
-    global _feh_proc, _feh_hidden
+    global _feh_proc, _feh_hidden, _feh_composite_active
     if _feh_proc and _feh_proc.poll() is None:
         try:
             _feh_proc.terminate()
@@ -514,11 +688,12 @@ def _feh_hide():
             pass
     _feh_proc   = None
     _feh_hidden = True
+    _feh_composite_active = False
 
 
 def _feh_show(track_info: dict = None, jacket_path: str = None):
     """feh を起動して画像を再表示する（i キー）"""
-    global _feh_proc, _feh_hidden
+    global _feh_proc, _feh_hidden, _feh_composite_active
     _feh_hidden = False
 
     path = jacket_path or (str(_JACKET_TMP) if _JACKET_TMP.exists() else None)
@@ -537,7 +712,13 @@ def _feh_show(track_info: dict = None, jacket_path: str = None):
                 except Exception:
                     pass
             _feh_proc = show_fn(path, track_info)
+            # qji.py 側が曲情報付き合成画像(固定パス, --reload 付き)で表示できたか記録する。
+            # そうなら次の曲では feh を閉じずに画像ファイルの差し替えだけで済ませられる。
+            _comp = getattr(_qji, 'COVER_WITH_INFO_PATH', None)
+            _feh_composite_active = bool(
+                _feh_proc and _comp and getattr(_qji, 'current_image_path', None) == _comp)
         else:
+            _feh_composite_active = False
             if _feh_proc and _feh_proc.poll() is None:
                 try:
                     _feh_proc.terminate(); _feh_proc.wait(timeout=1)
@@ -553,6 +734,29 @@ def _feh_show(track_info: dict = None, jacket_path: str = None):
     except Exception as e:
         sys.stdout.write(f'\r  ⚠ 画像表示エラー: {e}        \n')
         sys.stdout.flush()
+
+def _feh_swap_composite(track_info: dict, jacket_path: str) -> bool:
+    """feh を閉じずに、曲情報付き合成画像ファイルだけを差し替える（曲間でデスクトップを出さない）。
+
+    feh は --reload 付きで同じファイルを表示し続けているので、ファイルが新しい曲の
+    画像に置き換わると自動的に表示が更新される。差し替えできたら True、
+    条件が合わない／失敗した場合は False（呼び出し側が従来どおり feh を起動し直す）。
+    """
+    if not (_feh_proc and _feh_proc.poll() is None
+            and _feh_composite_active and not _feh_hidden):
+        return False
+    try:
+        import __main__ as _qji
+        if not getattr(_qji, 'COVER_SEAMLESS_FOLDER', False):
+            return False
+        comp      = getattr(_qji, 'COVER_WITH_INFO_PATH', None)
+        create_fn = getattr(_qji, 'create_cover_with_info', None)
+        if not (comp and create_fn):
+            return False
+        return create_fn(jacket_path, track_info) == comp
+    except Exception:
+        return False
+
 
 def _update_now_playing(track: dict, state: dict, elapsed: int = 0):
     """
@@ -612,7 +816,9 @@ def _update_now_playing(track: dict, state: dict, elapsed: int = 0):
         # デスクトップ: 曲情報付きジャケット（新曲に変わったら自動表示）
         # ESC で非表示中（_feh_hidden=True）の場合は表示しない
         if jacket_path and not _feh_hidden:
-            _feh_show(track_info=track_info, jacket_path=jacket_path)
+            # ★ まず feh を閉じずに画像だけ差し替える。できなければ従来どおり起動し直す。
+            if not _feh_swap_composite(track_info, jacket_path):
+                _feh_show(track_info=track_info, jacket_path=jacket_path)
 
         # now-playing サーバー用に image_path も更新
         if hasattr(_qji, 'current_image_path'):
@@ -632,7 +838,8 @@ def _update_now_playing(track: dict, state: dict, elapsed: int = 0):
 
 def _clear_now_playing():
     """再生終了時: 情報クリア + feh 終了 + ANSI オーバーレイ停止"""
-    global _feh_proc
+    global _feh_proc, _feh_composite_active
+    _feh_composite_active = False
     # feh を終了
     if _feh_proc and _feh_proc.poll() is None:
         try:
@@ -1436,9 +1643,9 @@ def _key_listener_thread(state: dict, fd_orig_settings):
                             pass
                         tty.setraw(fd)
 
-                elif cl in ('0', '1', '2', '3', '4', '5', '6'):
-                    # ★ [0]=DSPバイパス(素通し)ON/OFF、[1]〜[6]=DSP音場をその場で切り替え。音声(ffmpeg→aplay)は止めず、
-                    #   曲の頭出しも発生しない（qji.py ローカル再生の[1]〜[6]キーと同じ挙動）。
+                elif cl in ('0', '1', '2', '3', '4', '5', '6', '7', '8'):
+                    # ★ [0]=DSPバイパス(素通し)ON/OFF、[1]〜[8]=DSP音場をその場で切り替え。音声(ffmpeg→aplay)は止めず、
+                    #   曲の頭出しも発生しない（qji.py ローカル再生の[1]〜[8]キーと同じ挙動）。
                     # 切替中(約4秒)は print の改行崩れを避けるため raw を一旦解除する。
                     termios.tcsetattr(fd, termios.TCSANOW, fd_orig_settings)
                     if not _is_dsp_mode_active():
@@ -1447,7 +1654,7 @@ def _key_listener_thread(state: dict, fd_orig_settings):
                     else:
                         result = _switch_dsp_venue_via_main(cl)
                         if result is None:
-                            print(f'\r  ℹ すでに v{cl} です')
+                            print(f'\r  ℹ すでに V{cl} です')
                     try:
                         termios.tcflush(fd, termios.TCIFLUSH)   # 切替中に溜まったキー入力を破棄
                     except Exception:
@@ -1459,6 +1666,36 @@ def _key_listener_thread(state: dict, fd_orig_settings):
                             track_info=state.get('current_track_info'),
                             jacket_path=state.get('current_jacket_path'),
                         )
+
+                elif cl == 'e':
+                    # ★ [e]→[w/n/o/v/b/c/...] 音場プリセット(qji.py ローカル再生と同じ操作)。
+                    #   rawモードのまま次のキーを読む(切替で cooked に戻すと Enter 待ちになるため)。
+                    _saved_ok = _field_key_action(state)
+                    try:
+                        termios.tcflush(fd, termios.TCIFLUSH)
+                    except Exception:
+                        pass
+                    if _saved_ok:
+                        # 記憶できたらジャケット表示へ戻る(音声は止めない)
+                        sys.stdout.write('\r\n  🖼️  ジャケット表示に戻ります...\r\n')
+                        sys.stdout.flush()
+                        time.sleep(0.4)
+                        _feh_show(
+                            track_info=state.get('current_track_info'),
+                            jacket_path=state.get('current_jacket_path'),
+                        )
+
+                elif cl == 'x':
+                    # ★ [x] Sonia Intelligence 音響プリセット(qji.py ローカル再生と同じメニュー)
+                    if _si_menu_action(state):
+                        _replay_flag = True   # 調整したEQを今の曲へすぐ反映(頭から再生し直し)
+
+                elif cl == 'r':
+                    # ★ 今の曲を頭から再生し直す(楽器EQなど、次曲/再読込で反映される設定を今すぐ反映)
+                    _replay_flag = True
+                    termios.tcsetattr(fd, termios.TCSANOW, fd_orig_settings)
+                    print('\r  🔄 再読込します...        ', flush=True)
+                    tty.setraw(fd)
 
                 elif cl == 'a':
                     # 自動ジャンル検出モード（手動ロックを解除して再適用）
@@ -1748,8 +1985,14 @@ def _play_one_gapless(stream_url: str, sample_rate: int,
 
 
 def _play_list(client: QobuzClient, tracks: List[dict],
-               start: int, build_filter_func, state: dict):
-    """トラックリストを順番に再生。次トラックの URL はバックグラウンドで先読みする。"""
+               start: int, build_filter_func, state: dict,
+               keep_cover: bool = False):
+    """トラックリストを順番に再生。次トラックの URL はバックグラウンドで先読みする。
+
+    keep_cover=True: 終了時にジャケット画面(feh)を閉じない。複数アルバム/プレイリストを
+    続けて再生する時、アルバムの切れ目でデスクトップが見えないようにするため。
+    （最後の1本は keep_cover=False で呼ぶか、呼び出し側が _clear_now_playing() する）
+    """
 
     def _get_filter_args(sample_rate: int = 44100):
         import __main__ as _qji
@@ -1763,7 +2006,7 @@ def _play_list(client: QobuzClient, tracks: List[dict],
                 state.get('tinnitus', False),
                 state.get('musikverein', True),
                 state.get('loudness', ''),
-                state.get('eq_part', ''),
+                state.get('eq_part', '') + _field_scene_eq_str(),   # ★ 音場プリセットの楽器EQを合成
                 state.get('volume', 12),
                 state.get('air_layer', True),
                 echo_mode=state.get('echo_mode', 'classical'),
@@ -1861,6 +2104,7 @@ def _play_list(client: QobuzClient, tracks: List[dict],
                 threading.Thread(target=_prefetch, args=(tid,), daemon=True).start()
 
     i = start
+    _si_last_tid['tid'] = None   # 新しい再生リストでは[x]の調整を持ち越さない
 
     while 0 <= i < len(tracks):
         t = tracks[i]
@@ -1871,7 +2115,7 @@ def _play_list(client: QobuzClient, tracks: List[dict],
         print(f'\n  ♫  {t.get("artist", "")} — {t.get("title", "")}{dur}')
         gapless_ind = ' 🔗GL' if state.get('gapless') else ''
         q_hint = '[q]次のPLへ' if state.get('playlist_queue_mode') else '[q]終了'
-        print(f'     [n]次 [b]前 {q_hint} [g]ゲイン [G]ギャップレス{gapless_ind} [w]APL [c]プリセット手動 [a]自動検出 [+/-]音量 [0]バイパス/[1-6]音場 [u/k/j/m]USB:{_usb_guard_summary_via_main()} [s]保存 [i]画像 [ESC]画像消')
+        print(f'     [n]次 [b]前 {q_hint} [g]ゲイン [G]ギャップレス{gapless_ind} [w]APL [c]プリセット手動 [a]自動検出 [+/-]音量 [0]バイパス/[1-8]音場 [e]音場プリセット [x]SI [r]再読込 [u/k/j/m]USB:{_usb_guard_summary_via_main()} [s]保存 [i]画像 [ESC]画像消')
 
         tid = t['track_id']
         if tid not in cached_url:
@@ -1898,6 +2142,9 @@ def _play_list(client: QobuzClient, tracks: List[dict],
 
         state['current_track'] = t
         _update_now_playing(t, state)
+
+        # ★ 音場プリセット: 曲の記憶 > 曲名ルール > 音場別の既定 を決めてからフィルターを組み立てる
+        _field_on_track_start(t, state)
 
         filter_args = _get_filter_args(sample_rate)
 
@@ -1928,7 +2175,8 @@ def _play_list(client: QobuzClient, tracks: List[dict],
         elif outcome == 'prev':
             i = max(0, i - 1)
 
-    _clear_now_playing()
+    if not keep_cover:
+        _clear_now_playing()
     # ギャップレスモードの後始末
     if state.get('gapless'):
         # ① まずパイプを閉じる → _pb_run の os.write() ブロックが EPIPE で解除される
@@ -2399,7 +2647,8 @@ def _handle_playlist_request(client: QobuzClient, build_filter_func,
             state['manual_preset_locked'] = False
             _apply_auto_preset(album, state)
 
-            result = _play_list(client, tracks, 0, build_filter_func, state)
+            result = _play_list(client, tracks, 0, build_filter_func, state,
+                                keep_cover=(idx < total))
             _restore_terminal()
 
             queue_items[idx-1]['done'] = True
@@ -2418,6 +2667,7 @@ def _handle_playlist_request(client: QobuzClient, build_filter_func,
         print(f'\n  🎵 プレイリスト全曲再生完了')
 
     finally:
+        _clear_now_playing()   # 途中中断でもジャケット画面を確実に閉じる(二重呼び出しは無害)
         # 必ずバーを停止してスクロール領域を元に戻す
         bar.stop()
         _restore_terminal()
@@ -2569,7 +2819,8 @@ def _handle_playlist_queue_request(client: QobuzClient, build_filter_func,
             state['current_playlist_id']   = pid
             state['current_playlist_name'] = name
             state['current_album']         = None
-            result = _play_list(client, tracks, 0, build_filter_func, state)
+            result = _play_list(client, tracks, 0, build_filter_func, state,
+                                keep_cover=(pl_idx < total_pl))
             _restore_terminal()
 
             if result == 'quit':
@@ -2587,6 +2838,7 @@ def _handle_playlist_queue_request(client: QobuzClient, build_filter_func,
 
     finally:
         state['playlist_queue_mode'] = False
+        _clear_now_playing()   # 途中中断でもジャケット画面を確実に閉じる(二重呼び出しは無害)
         _restore_terminal()
 
 def _handle_browser_request(client: QobuzClient, build_filter_func,

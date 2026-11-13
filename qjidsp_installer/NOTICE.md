@@ -6,7 +6,7 @@
 
 ### `Musikvereinsaal_48k_tail.wav`（残響インパルスレスポンス）
 
-`spatial_final_v1〜v6.yml` の `real_hall_L` / `real_hall_R` フィルターから参照されている、
+`spatial_final_v1〜v8.yml` の `real_hall_L` / `real_hall_R` フィルターから参照されている、
 ウィーン楽友協会大ホール（Musikverein）の残響を模したIR（インパルスレスポンス）ファイルです。
 
 **推定される出典**：[Voxengo Free Reverb Impulse Responses](https://www.voxengo.com/impulses/)

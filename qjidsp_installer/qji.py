@@ -10,11 +10,20 @@ Qji.py - 日本語対応改善版（エンコーディング強化）+ プリセ
 - 設定ファイル: ~/.music_player_presets.json
 
 【追加機能】DSP音場の切替・バイパス
-- ホーム画面の [D] から DSP音場(v1〜v6)を切替
-- ラジオ/AirPlay/DLNA再生中も [1]〜[6] で音場切替、[0] でDSPバイパス(素通し)ON/OFF
+- ホーム画面の [D] から DSP音場(v1〜v8)を切替
+- ラジオ/AirPlay/DLNA再生中も [1]〜[8] で音場切替、[0] でDSPバイパス(素通し)ON/OFF
 - 手元音源の再生中も [0] でDSPバイパス(素通し)ON/OFF
 - ラジオのリセットキーを [0] から [r] に変更
 - 再生中の [u]/[k]/[j]/[y] で USB出力ノイズ対策の切替・状態表示（usb_noise_guard.py が必要。未導入でも動作します）
+
+【追加機能】v7 倍音ホールモード / v8 実態感ホール と 音場プリセット
+- v7 倍音ホールモード(v5ベース): 籠もらず聴きやすい。wobble_v7.py と ~/qjidsp_backup_v7/spatial_final.yml が必要
+- v8 実態感ホール(v5ベース): 響きが濃く実体感が強い。wobble_v8.py と ~/qjidsp_backup_v8/spatial_final.yml が必要
+- 再生中の [e] で音場プリセット(楽器・声楽・揺らぎ・音量連動・記憶)を操作（qji_field_ctl.py が必要。未導入でも動作します）
+
+【追加機能】フォルダー再生のジャケット連続表示
+- フォルダー再生中は曲間で feh を閉じず、合成画像を差し替えるだけで次の曲へ移ります（曲間でデスクトップやターミナルが見えません）
+- 従来動作に戻す場合は COVER_SEAMLESS_FOLDER = False にしてください
 """
 
 import os
@@ -103,7 +112,7 @@ except Exception as _ung_e:
         return None
     def toggle_rtprio_guard(*_a, **_kw):
         return None
-    print(f"ℹ️  USB出力ノイズ対策システム: 未導入のため無効です（usb_noise_guard.py を qji.py と同じフォルダに置くと有効になります）")
+    print("ℹ️  USB出力ノイズ対策システム: 未導入のため無効です（usb_noise_guard.py を qji.py と同じフォルダに置くと有効になります）")
 # ===== ★★★ USB出力デジタルノイズ対策システム ここまで ★★★ =====
 
 # Webサーバー用インポート
@@ -314,8 +323,18 @@ current_playback_mode = 'tempo'
 stop_playback = False
 current_processes = {'ffmpeg': None, 'aplay': None, 'feh': None}
 output_device = 'hw:2,0'
+# ★★★ 音場プリセット([e]→...)。qji_field_ctl.py は camilladsp_test フォルダーに置く(wobbleと共有) ★★★
+try:
+    # QjiDSPインストーラー版は ~/qji/camilladsp_test/、手動配置の場合は ~/camilladsp_test/ のどちらでも見つかるようにする
+    for _fp_dir in (os.path.expanduser('~/qji/camilladsp_test'), os.path.expanduser('~/camilladsp_test')):
+        if os.path.isdir(_fp_dir) and _fp_dir not in sys.path:
+            sys.path.append(_fp_dir)
+    import qji_field_ctl as _qjifield
+    _qjifield.init()   # 前回起動時の状態を持ち越さない(揺らぎ・音量連動は既定ON)
+except Exception:
+    _qjifield = None
 dsp_mode_active = False  # DSPモード時はTrue（48000Hz固定）
-current_dsp_venue = None  # ★ 再生中の[1]〜[6]キー切替用: 現在有効なDSPモード(v1〜v6)。起動時選択/switch_dsp_venue()で更新
+current_dsp_venue = None  # ★ 再生中の[1]〜[8]キー切替用: 現在有効なDSP音場(V1〜V8)。起動時選択/switch_dsp_venue()で更新
 DSP_VENUE_LABELS = {
     '1': '🏛️ 濃厚ホール(静)',
     '2': '🏛️ 濃厚ホール(動)',
@@ -323,11 +342,21 @@ DSP_VENUE_LABELS = {
     '4': '🎙️ 素材の味(動)',
     '5': '🎻 倍音モード',
     '6': '🎧 倍音モード(HP)',
+    '7': '🎚️ 倍音ホールモード',
+    '8': '🎭 実態感ホール',
     '0': '⚪ DSPバイパス(素通し)',
-}  # ★ ジャケット画面バッジ表示用ラベル（起動時のDSPモード選択メニューの説明文と対応）
-_dsp_venue_before_bypass = None  # ★ bypass([0])ON直前の音場(1〜6)。解除時にここへ戻す
+}  # ★ ジャケット画面バッジ表示用ラベル
+_dsp_venue_before_bypass = None  # ★ [0]バイパスON直前の音場(V1〜V8)。解除時にここへ戻す
 current_playing_track = None
 current_image_path = None
+
+# ★★★ フォルダー再生で曲間にジャケット画面(feh)を閉じない設定 ★★★
+# True : フォルダー再生中は feh を起動したまま、曲情報付きの合成画像ファイルを
+#        差し替えるだけで次の曲に移る（feh の --reload で自動更新）。
+#        曲間でデスクトップ/ターミナルが一瞬見えることがなくなる。
+# False: 従来通り、曲ごとに feh を閉じて起動し直す。
+COVER_SEAMLESS_FOLDER = True
+COVER_WITH_INFO_PATH = "/tmp/musicaplayer_covers/current_cover_with_info.jpg"
 next_track_requested = False
 prev_track_requested = False
 mode_change_requested = False
@@ -2444,7 +2473,7 @@ def get_sample_rate(file_path):
             '-of', 'default=noprint_wrappers=1:nokey=1',
             file_path
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if result.returncode == 0 and result.stdout.strip():
             return int(result.stdout.strip())
     except:
@@ -2452,6 +2481,76 @@ def get_sample_rate(file_path):
     
     # デフォルト値を返す
     return 44100
+
+
+def get_channel_count(file_path):
+    """
+    音声ファイルのチャンネル数を取得する
+    取得できない場合は None を返す（判定不能扱い＝警告対象外）
+    """
+    try:
+        audio = File(file_path)
+        if audio and hasattr(audio.info, 'channels'):
+            return int(audio.info.channels)
+    except Exception:
+        pass
+
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-select_streams', 'a:0',
+            '-show_entries', 'stream=channels',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            return int(result.stdout.strip())
+    except Exception:
+        pass
+
+    return None
+
+
+def _check_gapless_batch_format_mismatch(batch_tracks, expected_rate):
+    """
+    ギャップレス再生の対象曲すべてについて、サンプリングレート／チャンネル数が
+    先頭曲と一致しているか事前チェックする。
+
+    ffmpegの concat デマルチプレクサ（-f concat）は、セグメント間でストリームの
+    フォーマットを揃え直すことをしない。そのため、フォーマットが異なる曲が
+    バッチの途中に混ざっていると、その曲へ切り替わった瞬間にffmpegが異常終了
+    することがある（LAN上の音源で、特定の曲だけ再生が急に落ちる場合の典型的な
+    原因の一つ）。
+
+    ここでは実際に再生を始める前に全曲を軽くプローブし、先頭曲と食い違う曲が
+    あれば名指しで警告する。あくまで事前警告のみで、再生自体は止めない
+    （プローブが誤検出する可能性もゼロではないため）。
+    """
+    mismatches = []
+    for track in batch_tracks:
+        path = track.get('path', '')
+        if not path or not os.path.exists(path):
+            continue
+        rate = get_sample_rate(path)
+        channels = get_channel_count(path)
+        if rate and rate != expected_rate:
+            name = track.get('title', os.path.basename(path))
+            mismatches.append(f"  ・{name} … {rate}Hz（他の曲は{expected_rate}Hz）")
+        elif channels is not None and channels not in (1, 2):
+            # モノラル/ステレオ以外（サラウンド音源が1曲だけ混入等）も要注意
+            name = track.get('title', os.path.basename(path))
+            mismatches.append(f"  ・{name} … {channels}ch")
+
+    if mismatches:
+        print("\n⚠️  ギャップレス再生: フォーマットが異なる曲が混ざっています")
+        print("   （この曲に切り替わるタイミングで再生が停止する可能性があります）")
+        for line in mismatches[:10]:
+            print(line)
+        if len(mismatches) > 10:
+            print(f"  ... 他 {len(mismatches) - 10}曲")
+        print()
 
 
 # ★★★ 音量一定化(loudnorm)用: 実測値キャッシュ ★★★
@@ -3388,6 +3487,7 @@ def show_cover_image(image_path):
 def create_cover_with_info(image_path, track_info):
     """ジャケット画像に曲情報を重ねた画像を作成"""
     global air_particle_layer, musikverein_room_effects, current_filter_preset, current_gain_preset
+    global current_dsp_venue  # ★ ジャケット画像バッジ表示用
     try:
         # ImageMagickの確認
         subprocess.run(['which', 'convert'], check=True, capture_output=True)
@@ -3399,7 +3499,10 @@ def create_cover_with_info(image_path, track_info):
         # 一時ファイルを作成
         temp_dir = "/tmp/musicaplayer_covers"
         os.makedirs(temp_dir, exist_ok=True)
-        output_path = os.path.join(temp_dir, "current_cover_with_info.jpg")
+        final_output_path = os.path.join(temp_dir, "current_cover_with_info.jpg")
+        # ★ 作業用ファイルで合成し、完成後に os.replace で一瞬で差し替える。
+        #   feh(--reload)が合成途中の画像を読んで画面が乱れるのを防ぐ。
+        output_path = os.path.join(temp_dir, "current_cover_with_info_work.jpg")
         
         # ★★★ 画像を一定サイズにリサイズ ★★★
         # 標準サイズを設定（例：1200x1200）
@@ -3621,11 +3724,11 @@ def create_cover_with_info(image_path, track_info):
                 subprocess.run(preset_composite_cmd, capture_output=True, check=True, timeout=5)
         except Exception:
             pass  # プリセットバッジ生成失敗は無視して通常画像を使用
-        
-        # ★★★ 音場バッジ(左上・2段目): 現在有効なDSPモード(v1〜v6)を表示 ★★★
+
+        # ★★★ 音場バッジ(左上・2段目): 現在有効なCamillaDSP音場(V1〜V8)を表示 ★★★
         try:
             if current_dsp_venue:
-                _venue_badge_label = DSP_VENUE_LABELS.get(current_dsp_venue, f"v{current_dsp_venue}")
+                _venue_badge_label = DSP_VENUE_LABELS.get(current_dsp_venue, f"V{current_dsp_venue}")
                 _venue_badge_text = f"🎧 {_venue_badge_label}"
 
                 venue_badge_path = os.path.join(temp_dir, "venue_badge.png")
@@ -3656,7 +3759,10 @@ def create_cover_with_info(image_path, track_info):
         except Exception:
             pass  # 音場バッジ生成失敗は無視して通常画像を使用
         
-        return output_path if os.path.exists(output_path) else image_path
+        if os.path.exists(output_path):
+            os.replace(output_path, final_output_path)
+            return final_output_path
+        return image_path
     
     except Exception as e:
         # エラーが発生した場合は元の画像を返す
@@ -3765,15 +3871,12 @@ def shutdown_dsp():
 
 def switch_dsp_venue(dsp_choice):
     """
-    ★ 再生中に[1]〜[6]キーでDSPモード(v1〜v6)を切り替える。
+    ★ 再生中に[1]〜[8]キーでDSP音場(V1〜V8)を切り替える。
 
-    起動時のDSPモード選択と同じ _yml_map / _wobble_map を使い、CamillaDSPと
-    wobbleを再起動して差し替える。DAC出力先（device/format）は切り替え前の
-    値をそのまま新しいYAMLに引き継ぐので、選び直しは発生しない
-    （「音場だけ変わって出力先は変わらない」を実現する）。
-    ffmpeg→aplay の音声パイプラインには一切触れないため、再生中の曲は
-    途切れず、頭出しも発生しない。
-
+    reinitialize_dsp_output()と違い、DACの選び直しは行わない。
+    現在有効なDAC出力設定(device/format)は退避しておき、
+    新しいVenueのYAML全体にそのまま引き継ぐことで、
+    「音場だけ変わって出力先は変わらない」を実現する。
     戻り値: 成功したらTrue、失敗したらFalse
     """
     global current_dsp_venue
@@ -3796,7 +3899,6 @@ def _switch_dsp_venue_impl(dsp_choice):
     _HOME = os.path.expanduser("~")
     _live_yml = f'{_HOME}/camilladsp_test/spatial_final.yml'
 
-    # ★ 起動時のDSPモード選択メニューと同じマッピング（v1〜v6のみ）
     _yml_map = {
         '1': f'{_HOME}/qjidsp_backup_v1/spatial_final.yml',
         '2': f'{_HOME}/qjidsp_backup_v2/spatial_final.yml',
@@ -3804,6 +3906,8 @@ def _switch_dsp_venue_impl(dsp_choice):
         '4': f'{_HOME}/qjidsp_backup_v4/spatial_final.yml',
         '5': f'{_HOME}/qjidsp_backup_v5/spatial_final.yml',
         '6': f'{_HOME}/qjidsp_backup_v6/spatial_final.yml',
+        '7': f'{_HOME}/qjidsp_backup_v7/spatial_final.yml',
+        '8': f'{_HOME}/qjidsp_backup_v8/spatial_final.yml',
     }
     _wobble_map = {
         '1': f'{_HOME}/camilladsp_test/wobble_v1.py',
@@ -3812,6 +3916,8 @@ def _switch_dsp_venue_impl(dsp_choice):
         '4': f'{_HOME}/camilladsp_test/wobble_v4.py',
         '5': f'{_HOME}/camilladsp_test/wobble_v5.py',
         '6': f'{_HOME}/camilladsp_test/wobble_v5_harmonics_hp.py',
+        '7': f'{_HOME}/camilladsp_test/wobble_v7.py',
+        '8': f'{_HOME}/camilladsp_test/wobble_v8.py',
     }
 
     if dsp_choice not in _yml_map:
@@ -3853,7 +3959,7 @@ def _switch_dsp_venue_impl(dsp_choice):
             _yml_content = _f_src.read()
         _yml_content = _yml_content.replace('{HOME}', _HOME)
 
-        # ★ 退避しておいた現在のDAC device/format設定を、新しいモードのYAMLに引き継ぐ
+        # ★ 退避しておいた現在のDAC device/format設定を、新しいVenueのYAMLに引き継ぐ
         if _current_device_line or _current_format_line:
             _new_lines2 = []
             _in_playback2 = False
@@ -3911,6 +4017,11 @@ def _switch_dsp_venue_impl(dsp_choice):
 
     _reapply_usb_guard(_usb_prev)  # ★ 新しいCamillaDSP/wobbleのPIDにもRT優先度を引き継ぐ
     current_dsp_venue = dsp_choice
+    try:
+        if _qjifield is not None:
+            _qjifield.set_venue(dsp_choice)   # ★ v7/v8で響き・揺らぎ・音量連動の強さを切り替える
+    except Exception:
+        pass
     terminal_print(f"✅ DSP v{dsp_choice} へ切り替えました")
     return True
 
@@ -4154,12 +4265,12 @@ def toggle_dsp_bypass():
     try:
         if current_dsp_venue == '0':
             _back = _dsp_venue_before_bypass or '1'
-            terminal_print(f"\n🎛️ DSPバイパスを解除し、{DSP_VENUE_LABELS.get(_back, 'v' + _back)} に戻します...")
+            terminal_print(f"\n🎛️ DSPバイパスを解除し、{DSP_VENUE_LABELS.get(_back, 'V' + _back)} に戻します...")
             return _switch_dsp_venue_impl(_back)
         return _enable_dsp_bypass()
     except Exception as _e:
         terminal_print(f"❌ DSPバイパス切替中に予期しないエラー: {_e}")
-        terminal_print("💡 再生は継続します。状態が不安定な場合は [1]〜[6] で音場を選び直してください。")
+        terminal_print("💡 再生は継続します。状態が不安定な場合は [1]〜[8] で音場を選び直してください。")
         return False
 
 
@@ -4189,7 +4300,7 @@ def _usb_guard_key_action(key):
 
 
 def _switch_dsp_venue_from_stream_key(key):
-    """★ ラジオ/AirPlay/DLNA 再生中の[1]〜[6]キー用の共通ラッパー。
+    """★ ラジオ/AirPlay/DLNA 再生中の[1]〜[8]キー用の共通ラッパー。
     音声(ffmpeg→aplay)は止めず、CamillaDSPの音場だけを切り替える(約4秒)。
     戻り値: True=切替成功 / False=失敗・DSP無効 / None=すでにその音場。"""
     if not dsp_mode_active:
@@ -4198,7 +4309,7 @@ def _switch_dsp_venue_from_stream_key(key):
     if key == '0':  # ★ DSPバイパス(素通し)ON/OFF
         _ok = toggle_dsp_bypass()
     elif current_dsp_venue == key:
-        print(f"\n   ℹ️ すでに {DSP_VENUE_LABELS.get(key, 'v' + key)} です")
+        print(f"\n   ℹ️ すでに {DSP_VENUE_LABELS.get(key, 'V' + key)} です")
         return None
     else:
         _ok = switch_dsp_venue(key)
@@ -4209,7 +4320,7 @@ def _switch_dsp_venue_from_stream_key(key):
         pass
     if _ok:
         _cur = current_dsp_venue or key
-        print(f"   🎛️ 現在の音場: {DSP_VENUE_LABELS.get(_cur, 'v' + str(_cur))}")
+        print(f"   🎛️ 現在の音場: {DSP_VENUE_LABELS.get(_cur, 'V' + str(_cur))}")
     return _ok
 
 
@@ -4721,7 +4832,7 @@ def play_radio_stream(station):
       [s] 現在の音場設定をこの局に保存（SI EQデルタ含む / ストリーム継続）
       [l] 保存済み他局プリセット一覧→選択して適用（再起動）
       [r] デフォルト設定にリセット（再起動）
-      [0] DSPバイパス(素通し)ON/OFF、[1]〜[6] DSP音場切替（DSPモード時のみ / ストリーム継続）
+      [0] DSPバイパス(素通し)ON/OFF、[1]〜[8] DSP音場切替（DSPモード時のみ / ストリーム継続）
       [q] 停止してメインメニューへ
     """
     global stop_playback, current_processes
@@ -4944,9 +5055,9 @@ def play_radio_stream(station):
             print(f"\n✅ 接続成功！")
             print(f"🎵 再生中: {country} {name}")
             print(f"   🏛️  {_fp_now}  |  Air Particle: {_space_label}")
-            _ctrl_hint = ("[c]フィルター | [x]SIプリセット | [a]奏在 | [0]バイパス/[1-6]音場 | [u/k/j/m]USB対策 | [s]保存 | [l]他局コピー | [r]リセット | [q]停止"
+            _ctrl_hint = ("[c]フィルター | [x]SIプリセット | [a]奏在 | [0]バイパス/[1-8]音場 | [u/k/j/m]USB対策 | [s]保存 | [l]他局コピー | [r]リセット | [q]停止"
                           if SI_AVAILABLE else
-                          "[c]フィルター | [a]奏在 | [0]バイパス/[1-6]音場 | [u/k/j/m]USB対策 | [s]保存 | [l]他局コピー | [r]リセット | [q]停止")
+                          "[c]フィルター | [a]奏在 | [0]バイパス/[1-8]音場 | [u/k/j/m]USB対策 | [s]保存 | [l]他局コピー | [r]リセット | [q]停止")
             print(f"   {_ctrl_hint}")
             print("=" * 60)
 
@@ -4965,8 +5076,8 @@ def play_radio_stream(station):
                         # ★ USBノイズ対策の切替/状態表示（ストリームは止めない）
                         _usb_guard_key_action(key)
 
-                    elif key in ('0', '1', '2', '3', '4', '5', '6'):
-                        # ★ [0]=DSPバイパス、[1]〜[6]=DSP音場をその場で切替（ストリームは止めない）
+                    elif key in ('0', '1', '2', '3', '4', '5', '6', '7', '8'):
+                        # ★ [0]=DSPバイパス、[1]〜[8]=DSP音場をその場で切替（ストリームは止めない）
                         _switch_dsp_venue_from_stream_key(key)
 
                     elif key in ('c', 'x', 'l', 'r', 'a'):
@@ -5605,9 +5716,9 @@ def play_airplay_stream():
             print(f'\n📡 AirPlay レシーバー起動: 「{device_name}」')
             print(f'   ループバック: {loopback_play} → {loopback_cap} → {output_device} ({_fmt_label})')
             print(f'   🏛️  {_fp_label}  |  Air Particle: {_space_label}')
-            _hint = ('[c]フィルター|[x]SIプリセット|[a]奏在|[h]楽友協会|[0]バイパス/[1-6]音場|[u/k/j/m]USB|[i]画像|[+/-]音量|[q]停止'
+            _hint = ('[c]フィルター|[x]SIプリセット|[a]奏在|[h]楽友協会|[0]バイパス/[1-8]音場|[u/k/j/m]USB|[i]画像|[+/-]音量|[q]停止'
                      if SI_AVAILABLE else
-                     '[c]フィルター|[a]奏在|[h]楽友協会|[0]バイパス/[1-6]音場|[u/k/j/m]USB|[i]画像|[+/-]音量|[q]停止')
+                     '[c]フィルター|[a]奏在|[h]楽友協会|[0]バイパス/[1-8]音場|[u/k/j/m]USB|[i]画像|[+/-]音量|[q]停止')
             print(f'   {_hint}')
             print('=' * 60)
             print('⏳ iPhone / Mac で「Qji」を AirPlay 出力先に選択してください...')
@@ -5724,8 +5835,8 @@ def play_airplay_stream():
                             # ★ USBノイズ対策の切替/状態表示（ストリームは止めない）
                             _usb_guard_key_action(key)
 
-                        elif key in ('0', '1', '2', '3', '4', '5', '6'):
-                            # ★ [0]=DSPバイパス、[1]〜[6]=DSP音場をその場で切替（パイプラインは止めない）
+                        elif key in ('0', '1', '2', '3', '4', '5', '6', '7', '8'):
+                            # ★ [0]=DSPバイパス、[1]〜[8]=DSP音場をその場で切替（パイプラインは止めない）
                             _switch_dsp_venue_from_stream_key(key)
 
                         elif key in ('c', 'x', 'a', 'h'):
@@ -5915,6 +6026,17 @@ def _gmrender_show_cover(cover_url: str, title: str, artist: str, album: str):
     orig_path  = os.path.join(cover_dir, 'original_cover.jpg')
     final_path = os.path.join(cover_dir, 'current_cover.jpg')
 
+    # ★★★ 診断ログ: DLNAのジャケット表示が出ない場合の原因調査用 ★★★
+    _log_path = '/tmp/qji_gmrender_cover_debug.log'
+    def _dbglog(msg):
+        try:
+            with open(_log_path, 'a', encoding='utf-8') as _lf:
+                _lf.write(f"{time.strftime('%H:%M:%S')} [show_cover] {msg}\n")
+        except Exception:
+            pass
+
+    _dbglog(f"start: url={cover_url!r} title={title!r}")
+
     try:
         # ── カバー画像ダウンロード ──────────────────────────────────────
         req = urllib.request.Request(cover_url,
@@ -5922,6 +6044,7 @@ def _gmrender_show_cover(cover_url: str, title: str, artist: str, album: str):
         with urllib.request.urlopen(req, timeout=10) as resp:
             with open(orig_path, 'wb') as f:
                 f.write(resp.read())
+        _dbglog(f"download OK: {os.path.getsize(orig_path)} bytes")
 
         # ── テキスト合成（ImageMagick があれば）────────────────────────
         if shutil.which('convert') and shutil.which('identify'):
@@ -5955,10 +6078,13 @@ def _gmrender_show_cover(cover_url: str, title: str, artist: str, album: str):
                 if os.path.isfile(tmp_path):
                     os.replace(tmp_path, final_path)
                 else:
+                    _dbglog("convert produced no tmp_path — falling back to plain cover")
                     shutil.copy2(orig_path, final_path)
-            except Exception:
+            except Exception as _e_conv:
+                _dbglog(f"convert step failed: {_e_conv!r} — falling back to plain cover")
                 shutil.copy2(orig_path, final_path)
         else:
+            _dbglog("ImageMagick (convert/identify) not found — using plain cover")
             shutil.copy2(orig_path, final_path)
 
         # ── feh 表示 ───────────────────────────────────────────────────
@@ -5967,15 +6093,23 @@ def _gmrender_show_cover(cover_url: str, title: str, artist: str, album: str):
         time.sleep(0.05)
         env = dict(os.environ)
         env.setdefault('DISPLAY', ':0')
-        subprocess.Popen(
+        _feh_proc = subprocess.Popen(
             ['feh', '--fullscreen', '--auto-zoom', '--borderless',
              '--no-menus', '--title', 'Now Playing', final_path],
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except Exception:
-        pass   # カバー表示失敗は無音で無視
+        time.sleep(0.3)
+        if _feh_proc.poll() is not None:
+            # ★ feh がすぐ終了した = DISPLAY/Xアクセス等で表示できていない可能性
+            _dbglog(f"feh exited immediately with code {_feh_proc.returncode} "
+                    f"(DISPLAY={env.get('DISPLAY')}) — image was likely NOT shown")
+        else:
+            _dbglog(f"feh launched OK (pid={_feh_proc.pid}, DISPLAY={env.get('DISPLAY')})")
+    except Exception as e:
+        _dbglog(f"EXCEPTION: {e!r}")
+        pass   # カバー表示失敗は無音で無視（ただしログには残す）
 
 
 def _gmrender_cover_poller(stop_event, port=49494):
@@ -5992,10 +6126,45 @@ def _gmrender_cover_poller(stop_event, port=49494):
     import re as _re
     import hashlib
     import socket as _socket
+    import subprocess as _subprocess
+    import shutil as _shutil
 
-    # libupnp は LAN IP にバインドするため localhost では繋がらない。
-    # ダミー UDP 接続でルーティングに使われる LAN IP を動的取得する。
-    def _get_lan_ip():
+    _log_path = '/tmp/qji_gmrender_cover_debug.log'
+    def _dbglog(msg):
+        try:
+            with open(_log_path, 'a', encoding='utf-8') as _lf:
+                _lf.write(f"{time.strftime('%H:%M:%S')} [poller] {msg}\n")
+        except Exception:
+            pass
+
+    # ★★★ 修正: LAN IPをダミーUDP接続で「推測」するのをやめ、gmediarenderが実際に
+    #   bindしているIPv4アドレスを ss/netstat から直接読み取る方式に変更。
+    #
+    #   複数のIP(有線+Wi-Fi、古いDHCPリースの残存等)を持つマシンでは、ダミー
+    #   UDP接続で得られる「OSがこの宛先に使うであろうIP」と、gmediarender
+    #   (libupnp)が実際にbindするIPが食い違うことがあり、その場合ポーラーは
+    #   永久に「Connection refused」になる(実際にこの不具合が発生した)。
+    #   実際にLISTENしているIPを見れば、この食い違いは原理的に起こらない。
+    def _get_gmediarender_bound_ip():
+        try:
+            for _tool_cmd in (['ss', '-ltnp'], ['netstat', '-ltnp']):
+                if not _shutil.which(_tool_cmd[0]):
+                    continue
+                _out = _subprocess.run(_tool_cmd, capture_output=True, text=True, timeout=3).stdout
+                for _line in _out.splitlines():
+                    if 'gmediarender' not in _line:
+                        continue
+                    _m = _re.search(r'(\d+\.\d+\.\d+\.\d+):' + str(port) + r'\b', _line)
+                    if _m and _m.group(1) != '0.0.0.0':
+                        return _m.group(1)
+                break  # 見つかるツールは1つあれば十分。無ければ次のツールを試す
+        except Exception:
+            pass
+        return None
+
+    # ★ 上記が使えない環境(ss/netstat が無い等)向けの最終フォールバックとしてのみ
+    #   ダミーUDP接続方式を残す。
+    def _get_lan_ip_fallback():
         try:
             with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as _s:
                 _s.connect(('192.168.0.1', 1))   # 送信しない。OSがsrcIPを決める
@@ -6032,16 +6201,35 @@ def _gmrender_cover_poller(stop_event, port=49494):
             pass
         return f'http://{ip}:{port}/upnp/control/rendertransport1'  # fallback
 
-    _ip     = _get_lan_ip()
-    _CTRL   = _find_ctrl_url(_ip)   # 例: http://192.168.11.22:49494/upnp/control/rendertransport1
+    _ip = None    # ★ ループ内で確定するまでNone（起動直後はまだbindされていない可能性があるため）
+    _CTRL = None
     _ACTION = '"urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo"'
 
+    _dbglog(f"started (waiting to detect gmediarender's actual bound IP)")
+
     last_hash = ''
+    _err_count = 0
 
     while not stop_event.is_set():
         stop_event.wait(2.0)   # 2 秒待機。stop_event.set() で即時脱出
         if stop_event.is_set():
             break
+
+        # ★ まだIPが確定していなければ、gmediarenderの実際のbind先を再検出する。
+        #   毎回このチェックが走るのはIPが未確定の間だけ(通常は起動直後の1〜2回で確定する)。
+        if _CTRL is None:
+            _detected_ip = _get_gmediarender_bound_ip()
+            if _detected_ip:
+                _ip = _detected_ip
+                _CTRL = _find_ctrl_url(_ip)
+                _dbglog(f"gmediarenderの実bind先IPを検出: {_ip} -> ctrl_url={_CTRL}")
+            else:
+                _fallback_ip = _get_lan_ip_fallback()
+                _dbglog(f"ss/netstatでbind先IPを検出できず、フォールバックのLAN IP推測を使用: {_fallback_ip} "
+                        f"(この方式は複数IP環境で実際のbind先と食い違う場合があります)")
+                _ip = _fallback_ip
+                _CTRL = _find_ctrl_url(_ip)
+
         try:
             req = urllib.request.Request(
                 _CTRL, data=_SOAP,
@@ -6056,9 +6244,11 @@ def _gmrender_cover_poller(stop_event, port=49494):
             # TrackMetaData タグを取得（DIDL-Lite が HTML エンコードで入っている）
             m = _re.search(r'<TrackMetaData>(.*?)</TrackMetaData>', body, _re.DOTALL)
             if not m:
+                _dbglog("no <TrackMetaData> tag in GetPositionInfo response")
                 continue
             raw = m.group(1).strip()
             if not raw or raw in ('NOT_IMPLEMENTED', 'NO_MEDIA_PRESENT', ''):
+                _dbglog(f"TrackMetaData empty/placeholder: {raw!r}")
                 continue
 
             meta = _html.unescape(raw)   # &lt; → < 等を戻す
@@ -6074,7 +6264,15 @@ def _gmrender_cover_poller(stop_event, port=49494):
             cover  = _re.search(r'<upnp:albumArtURI>([^<]*)</upnp:albumArtURI>', meta)
 
             if not title or not cover:
+                # ★ ここが一番ありがちな「画像が出ない」の原因: コントロールアプリ側が
+                #   そもそもアルバムアートURIをDIDLメタデータに含めていないケース。
+                #   metaの先頭部分をログに残し、次回原因を一目で確認できるようにする。
+                _dbglog(f"missing title or albumArtURI (title={bool(title)}, cover={bool(cover)}); "
+                        f"meta head: {meta[:300]!r}")
                 continue
+
+            _dbglog(f"new track detected: title={title.group(1).strip()!r} "
+                    f"cover_url={cover.group(1).strip()!r}")
 
             threading.Thread(
                 target=_gmrender_show_cover,
@@ -6087,8 +6285,13 @@ def _gmrender_cover_poller(stop_event, port=49494):
                 daemon=True,
             ).start()
 
-        except Exception:
-            pass   # gmrender 起動前・停止後は例外が出るが無視
+        except Exception as e:
+            _err_count += 1
+            if _err_count <= 3 or _err_count % 30 == 0:
+                # ★ 起動直後・停止後の例外は普通に起きるため、最初の数回＋以後は
+                #   30回(=約1分)おきだけ記録し、ログが肥大化しないようにする
+                _dbglog(f"poll exception (#{_err_count}): {e!r}")
+            pass   # gmrender 起動前・停止後は例外が出るが無視（ログには残す）
 
 
 def _stop_gmediarender_all():
@@ -6113,7 +6316,7 @@ def play_gmediarender_stream():
 
     ── キー操作 ──
       [c] フィルター変更  [h] 楽友協会  [a] Air Particle
-      [x] SI プリセット   [+/-] 音量    [q] 停止
+      [x] SI プリセット   [i] 画像再表示  [+/-] 音量    [q] 停止
     """
     global stop_playback, current_processes
     global tinnitus_reduction_mode, musikverein_room_effects, air_particle_layer
@@ -6229,9 +6432,9 @@ def play_gmediarender_stream():
             print(f'\n📡 UPnP/DLNA レシーバー起動: 「{device_name}」')
             print(f'   ループバック: {loopback_play} → {loopback_cap} → {output_device} ({_fmt_label})')
             print(f'   🏛️  {_fp_label}  |  音場: {_space_label}')
-            _hint = ('[c]フィルター|[x]SIプリセット|[a]奏在|[h]楽友協会|[0]バイパス/[1-6]音場|[u/k/j/m]USB|[+/-]音量|[q]停止'
+            _hint = ('[c]フィルター|[x]SIプリセット|[a]奏在|[h]楽友協会|[0]バイパス/[1-8]音場|[u/k/j/m]USB|[i]画像|[+/-]音量|[q]停止'
                      if SI_AVAILABLE else
-                     '[c]フィルター|[a]奏在|[h]楽友協会|[0]バイパス/[1-6]音場|[u/k/j/m]USB|[+/-]音量|[q]停止')
+                     '[c]フィルター|[a]奏在|[h]楽友協会|[0]バイパス/[1-8]音場|[u/k/j/m]USB|[i]画像|[+/-]音量|[q]停止')
             print(f'   {_hint}')
             print('=' * 60)
 
@@ -6277,7 +6480,49 @@ def play_gmediarender_stream():
                         print('   ログ: /tmp/qji_gmediarender.log')
                         input('   [Enter] でメニューに戻ります...')
                         return
+                    # ★★★ 診断用: gmediarenderが実際にどのポートでlistenしているかを記録 ★★★
+                    # --port 49494 を指定しても、gmediarenderのビルドによっては
+                    # 実際の待受ポートに反映されない場合があり、その場合カバーアート
+                    # ポーラー（49494番に固定でSOAPを送る）が永久に「Connection refused」
+                    # になる。実際のlisten状況をここで記録しておけば一目で切り分けられる。
+                    def _log_listen_snapshot(_when_label):
+                        try:
+                            _ss_out = None
+                            for _tool_cmd in (['ss', '-ltnp'], ['netstat', '-ltnp']):
+                                if shutil.which(_tool_cmd[0]):
+                                    _ss_out = subprocess.run(
+                                        _tool_cmd, capture_output=True, text=True, timeout=3
+                                    ).stdout
+                                    break
+                            with open('/tmp/qji_gmrender_cover_debug.log', 'a', encoding='utf-8') as _lf:
+                                if _ss_out is None:
+                                    _lf.write(f"{time.strftime('%H:%M:%S')} [launch/{_when_label}] "
+                                              f"ss/netstatが見つからずlisten状況を確認できませんでした\n")
+                                else:
+                                    _gm_lines = [l for l in _ss_out.splitlines()
+                                                 if str(gmrender_proc.pid) in l or 'gmediarender' in l]
+                                    _lf.write(f"{time.strftime('%H:%M:%S')} [launch/{_when_label}] "
+                                              f"gmediarender pid={gmrender_proc.pid}, listening sockets:\n")
+                                    if _gm_lines:
+                                        for _l in _gm_lines:
+                                            _lf.write(f"    {_l}\n")
+                                    else:
+                                        _lf.write("    (該当するLISTENソケットが見つかりませんでした"
+                                                  " — gmediarenderがHTTPサーバーを開いていない可能性)\n")
+                        except Exception as _e_ss:
+                            try:
+                                with open('/tmp/qji_gmrender_cover_debug.log', 'a', encoding='utf-8') as _lf:
+                                    _lf.write(f"{time.strftime('%H:%M:%S')} [launch/{_when_label}] ss確認失敗: {_e_ss!r}\n")
+                            except Exception:
+                                pass
+
+                    # ★ 起動直後(1.5秒後)と、少し待った後(6秒後)の2回スナップショットを取る。
+                    #   gmediarenderのHTTPサーバー起動が遅い場合との区別のため。
+                    _log_listen_snapshot('直後')
+                    threading.Timer(5.0, _log_listen_snapshot, args=('6秒後',)).start()
+
                     print(f'\n✅ 受信待機中 — UPnP コントローラーで「{device_name}」を選択して再生してください')
+                    print('   💡 ジャケット画像が表示されない場合は /tmp/qji_gmrender_cover_debug.log を確認してください')
                 else:
                     print(f'\n🔄 フィルター更新 — UPnP 接続を維持して再起動します...')
 
@@ -6334,12 +6579,36 @@ def play_gmediarender_stream():
                             print(f'\n   🔊 出力ゲイン: {CURRENT_VOLUME:+d} dB')
                             _keep_gmrender = True; restart_stream = True; break
 
+                        elif key == 'i':
+                            # ★★★ [i] 直前に表示したジャケット画像を再表示 ★★★
+                            # _gmrender_show_cover() は毎回同じ固定パス
+                            # (/tmp/gmediarender_covers/current_cover.jpg) に上書き保存する
+                            # ので、Escで閉じた後もファイル自体は残っている。再ダウンロード
+                            # 不要で、feh を再度立ち上げるだけで良い(再生・音声には無関係)。
+                            _dlna_cover_path = '/tmp/gmediarender_covers/current_cover.jpg'
+                            if os.path.exists(_dlna_cover_path):
+                                subprocess.run(['pkill', '-f', 'feh.*current_cover'],
+                                               capture_output=True)
+                                time.sleep(0.05)
+                                _env_i = dict(os.environ)
+                                _env_i.setdefault('DISPLAY', ':0')
+                                subprocess.Popen(
+                                    ['feh', '--fullscreen', '--auto-zoom', '--borderless',
+                                     '--no-menus', '--title', 'Now Playing', _dlna_cover_path],
+                                    env=_env_i,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                )
+                                print('\n   🖼️  ジャケット画像を再表示しました')
+                            else:
+                                print('\n   ⚠️ まだジャケット画像がありません（曲が変わると表示されます）')
+
                         elif key in ('u', 'k', 'j', 'm', 'y'):
                             # ★ USBノイズ対策の切替/状態表示（ストリームは止めない）
                             _usb_guard_key_action(key)
 
-                        elif key in ('0', '1', '2', '3', '4', '5', '6'):
-                            # ★ [0]=DSPバイパス、[1]〜[6]=DSP音場をその場で切替（パイプラインは止めない）
+                        elif key in ('0', '1', '2', '3', '4', '5', '6', '7', '8'):
+                            # ★ [0]=DSPバイパス、[1]〜[8]=DSP音場をその場で切替（パイプラインは止めない）
                             _switch_dsp_venue_from_stream_key(key)
 
                         elif key in ('c', 'x', 'a', 'h'):
@@ -9400,6 +9669,18 @@ def _si_do_preset_menu():
             except Exception as e:
                 print(f"  ⚠️ {label}: {e}")
 
+    # ★★★ xメニューで確定したSIのEQを「この曲のあいだの確定値」として覚える ★★★
+    #   このあとの自動再読込で、保存済みプロファイルやSIの記憶が読み直されて、
+    #   [EQ全解除]や調整が打ち消されるのを防ぐ。曲が替わるまで有効。[s]保存はこの値で行われる。
+    try:
+        if (_qjifield is not None and _si_instance.current_params is not None
+                and current_playing_track):
+            _qjifield.set_si_eq_override(
+                current_playing_track.get('path', ''),
+                dict(getattr(_si_instance.current_params, 'eq', None) or {}))
+    except Exception:
+        pass
+
     _si_readline("\n  [Enter で再生を再開] ")
 
 
@@ -9616,8 +9897,7 @@ def _preset_piano(gain_db, current_volume, eq_part, musikverein_room_effects,
         return ['-af', main_chain]
 
 
-def _preset_chamber(gain_db, current_volume, eq_part, musikverein_room_effects,
-                    air_particle_layer, echo_mode, tinnitus_reduction_mode, loudness_filter):
+def _preset_chamber(gain_db, current_volume, eq_part, musikverein_room_effects, air_particle_layer, echo_mode, tinnitus_reduction_mode, loudness_filter):
     """室内楽プリセット。弦楽四重奏・ピアノトリオ等。ピアノフォルテのクリップを二段コンプで防止。"""
     parts = []
     parts.append(f'volume={gain_db}dB')
@@ -9628,10 +9908,10 @@ def _preset_chamber(gain_db, current_volume, eq_part, musikverein_room_effects,
     parts += [
         'equalizer=f=40:t=q:w=0.75:g=1.0',
         'equalizer=f=60:t=q:w=0.8:g=1.2',
-        'equalizer=f=2500:t=q:w=2.0:g=-0.8',  # ヴァイオリンのザラつく芯を消す
-        'equalizer=f=3800:t=q:w=2.0:g=-0.6',  # ピアノのアタックの硬さ・濁りを取る
-        'equalizer=f=6200:t=q:w=3.0:g=-1.0',  # エキサイターのチリチリする開始点を叩く
-        'equalizer=f=7400:t=q:w=3.0:g=-1.2',  # 耳障りな高域の擦れ音をピンポイントで消す
+        'equalizer=f=2500:t=q:w=2.0:g=-0.8', # ヴァイオリンのザラつく芯を消す
+        'equalizer=f=3800:t=q:w=2.0:g=-0.6', # ピアノのアタックの硬さ・濁りを取る
+        'equalizer=f=6200:t=q:w=3.0:g=-1.0', # エキサイターのチリチリする開始点を叩く
+        'equalizer=f=7400:t=q:w=3.0:g=-1.2', # 耳障りな高域の擦れ音をピンポイントで消す
         'equalizer=f=80:t=q:w=0.85:g=1.0',
         'equalizer=f=90:t=q:w=0.8:g=0.4',
         'equalizer=f=100:t=q:w=0.9:g=-0.4',
@@ -9650,6 +9930,7 @@ def _preset_chamber(gain_db, current_volume, eq_part, musikverein_room_effects,
         'equalizer=f=8000:t=q:w=1.5:g=0.2',
         'equalizer=f=6500:t=q:w=1.3:g=-0.5',
     ]
+    
     if musikverein_room_effects:
         parts.append('aecho=0.85:0.88:5:0.04')
         parts.append('aecho=0.90:0.92:3:0.035')
@@ -9659,43 +9940,53 @@ def _preset_chamber(gain_db, current_volume, eq_part, musikverein_room_effects,
         parts.append('acompressor=threshold=-20dB:ratio=1.45:attack=3:release=60:makeup=1.06')
         parts.append('acompressor=threshold=-30dB:ratio=1.32:attack=10:release=120:makeup=1.10')
         parts.append('treble=g=1.1')
-        if tinnitus_reduction_mode:
-            parts.append('highshelf=f=10000:g=-1.2:w=0.5')
-        else:
-            parts.append('highshelf=f=7000:g=0.9:w=0.7')
+        
+    if tinnitus_reduction_mode:
+        parts.append('highshelf=f=10000:g=-1.2:w=0.5')
+    else:
+        parts.append('highshelf=f=7000:g=0.9:w=0.7')
+        
     parts.append('acompressor=threshold=-18dB:ratio=1.08:attack=1:release=25:makeup=1.0')
     parts.append('alimiter=level_in=1.0:level_out=1.0:limit=0.96:attack=1:release=50')
+    
     if loudness_filter:
         parts.append(loudness_filter.rstrip(','))
+        
     # ★ loudnorm使用時は既に-2.0dBTPまで詰まっているため、この段の出力ゲインは
-    #   0dB超（＝さらなるブースト）を許可しない。減衰(マイナス側)のみ有効。
+    # 0dB超（＝さらなるブースト）を許可しない。減衰(マイナス側)のみ有効。
     _post_gain = current_volume if not loudness_filter else min(current_volume, 0)
+    
+    # 変更点1: elseルート（-af）のために、main_chainの最後のボリューム段から一律2dB引く
+    _post_gain_reduced = _post_gain - 2
     parts.append(
-        f'{eq_part}volume={_post_gain}dB,'
+        f'{eq_part}volume={_post_gain_reduced}dB,'
         'alimiter=level_in=1.0:level_out=1.0:limit=0.92:attack=1:release=50'
     )
+    
     main_chain = ','.join(parts)
+    
     if musikverein_room_effects and air_particle_layer:
-        _se = ('[str]aecho=0.65:0.75:11:0.019[side];' if echo_mode == 'jazz_vocal'
-               else '[str]aecho=0.65:0.75:11:0.031[side];')
-        _ce = ('[side]aecho=0.55:0.65:6:0.012[diff];' if echo_mode == 'jazz_vocal'
-               else '[side]aecho=0.55:0.65:6:0.02[diff];')
+        _se = ('[str]aecho=0.65:0.75:11:0.019[side];' if echo_mode == 'jazz_vocal' else '[str]aecho=0.65:0.75:11:0.031[side];')
+        _ce = ('[side]aecho=0.55:0.65:6:0.012[diff];' if echo_mode == 'jazz_vocal' else '[side]aecho=0.55:0.65:6:0.02[diff];')
+        
+        # 変更点2: filter_complexルート（[out]）の最終段（[premix]の後）に volume=-2dB を追加
         fc = (
-            f'[0:a]{main_chain}[main];'
-            + '[main]equalizer=f=250:t=q:w=1.3:g=0.4[str];'
-            + _se + _ce
-            + '[diff]volume=16dB[diffg];'
-            + 'anoisesrc=color=pink:amplitude=0.00040:r=48000:d=86400[air];'
-            + '[air]highpass=f=180,lowpass=f=8000[airband];'
-            + '[airband]volume=0.020,apulsator=hz=0.12:amount=0.08[airbed];'
-            + 'anoisesrc=color=brown:amplitude=0.00010:r=48000:d=86400[aud];'
-            + '[aud]highpass=f=220,volume=0.010[audience];'
-            + "[diffg][airbed][audience]amix=inputs=3:weights='1 0.012 0.005':normalize=0:duration=first[premix];"
-            + '[premix]alimiter=level_in=1.0:level_out=1.0:limit=0.92:attack=1:release=50[out]'
+            f'[0:a]{main_chain}[main];' +
+            '[main]equalizer=f=250:t=q:w=1.3:g=0.4[str];' +
+            _se + _ce +
+            '[diff]volume=16dB[diffg];' +
+            'anoisesrc=color=pink:amplitude=0.00040:r=48000:d=86400[air];' +
+            '[air]highpass=f=180,lowpass=f=8000[airband];' +
+            '[airband]volume=0.020,apulsator=hz=0.12:amount=0.08[airbed];' +
+            'anoisesrc=color=brown:amplitude=0.00010:r=48000:d=86400[aud];' +
+            '[aud]highpass=f=220,volume=0.010[audience];' +
+            "[diffg][airbed][audience]amix=inputs=3:weights='1 0.012 0.005':normalize=0:duration=first[premix];" +
+            '[premix]volume=-2dB,alimiter=level_in=1.0:level_out=1.0:limit=0.92:attack=1:release=50[out]'
         )
         return ['-filter_complex', fc, '-map', '[out]']
     else:
         return ['-af', main_chain]
+
 
 
 def _preset_vocal(gain_db, current_volume, eq_part, musikverein_room_effects,
@@ -10860,6 +11151,15 @@ def play_one_track(track, show_controls=True):
                 current_gain_preset = 'classical'
             _gain_preset_auto_linked_jazz = False
 
+    # ★★★ 音場プリセットの自動適用(曲の記憶 > アルバムの記憶 > 曲名ルール > 既定)★★★
+    #   フィルターが組み立てられる前にSIのEQとwobbleへ反映するので、[r]での再読込は不要。
+    try:
+        if _qjifield is not None:
+            _qjifield.on_track_start(track, _si_instance if SI_AVAILABLE else None, say=(terminal_print if SI_AVAILABLE else (lambda *_a, **_k: None)),
+                                          context={'dsp': dsp_mode_active, 'venue': current_dsp_venue, 'filter_preset': current_filter_preset})
+    except Exception:
+        pass
+
     terminal_print(f"\n▶ 再生中: {track.get('title', 'Unknown')}")
     terminal_print(f"   アーティスト: {track.get('artist', 'Unknown')}")
     if _profile_loaded:
@@ -10905,6 +11205,13 @@ def play_one_track(track, show_controls=True):
                 current_filter_preset = _db_fp
         _fp_label = FILTER_PRESET_LABELS.get(current_filter_preset, current_filter_preset)
         terminal_print(f"   🎛️  フィルター: {_fp_label}  ✦ジャンル自動")
+        # ★ SIが使えない環境では、フィルタープリセットがここで確定する。確定後にもう一度、音場別の既定(V7/V8×Musikverein等)を判定し直す
+        try:
+            if _qjifield is not None:
+                _qjifield.on_track_start(track, None, say=terminal_print,
+                                              context={'dsp': dsp_mode_active, 'venue': current_dsp_venue, 'filter_preset': current_filter_preset})
+        except Exception:
+            pass
 
     if current_audio_preset != 'none':
         preset_names = {
@@ -10950,11 +11257,11 @@ def play_one_track(track, show_controls=True):
         terminal_print(f"   ムード: {color}{emoji} {mood_jp}{reset}")
     
     if show_controls:
-        terminal_print(f"🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [ と ] 音量 | [v]音量調整ON/OFF | [0]バイパス/[1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
+        terminal_print(f"🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [ と ] 音量 | [v]音量調整ON/OFF | [0]バイパス/[1-8]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
         _gp_labels = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
         terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_labels.get(current_gain_preset, current_gain_preset)}) | [c]フィルター | [s]保存", end="")
         if SI_AVAILABLE:
-            terminal_print(" | [z]フィードバック | [x]プリセット | [a]アルバム登録 | [h]ホール | [p]プロファイル")
+            terminal_print(" | [z]フィードバック | [x]プリセット | [a]アルバム登録 | [h]ホール | [p]プロファイル | [e]音場プリセット")
         else:
             terminal_print()
 
@@ -10991,7 +11298,19 @@ def play_one_track(track, show_controls=True):
     image_path = find_cover_image_safe(track_path)
     if image_path:
         feh_running = current_processes['feh'] and current_processes['feh'].poll() is None
-        if not feh_running or current_image_path != image_path:
+        # ★★★ フォルダー再生: feh を閉じずに合成画像だけ差し替える（曲間でデスクトップを出さない）★★★
+        _cover_swapped = False
+        if (COVER_SEAMLESS_FOLDER and feh_running
+                and current_playback_mode == 'folder'
+                and current_image_path == COVER_WITH_INFO_PATH):
+            with info_display_lock:
+                _seamless_info = current_track_info.copy()
+            try:
+                if create_cover_with_info(image_path, _seamless_info) == COVER_WITH_INFO_PATH:
+                    _cover_swapped = True   # feh の --reload が数百ms〜1秒以内に新画像へ更新する
+            except Exception:
+                _cover_swapped = False      # 失敗時は従来どおり feh を起動し直す
+        if not _cover_swapped and (not feh_running or current_image_path != image_path):
             if feh_running:
                 try:
                     current_processes['feh'].terminate()
@@ -11071,7 +11390,8 @@ def play_one_track(track, show_controls=True):
 
         # ★★★ Sonia Intelligence: SI EQデルタをeq_partに追加 ★★★
         if SI_AVAILABLE and _si_instance and _si_instance.current_params:
-            _si_eq_str = _si_get_eq_filters(_si_instance.current_params)
+            _si_eq_str = _si_get_eq_filters(_qjifield.params_with_scene(_si_instance.current_params)
+                                           if _qjifield is not None else _si_instance.current_params)
             if _si_eq_str:
                 eq_part = eq_part + _si_eq_str + ','
         
@@ -11346,7 +11666,9 @@ def _collect_audio_profile() -> dict:
                 'wet_override':      getattr(p, 'wet_override', None),
                 'pre_delay_override':getattr(p, 'pre_delay_override', None),
                 'side_ratio_override':getattr(p, 'side_ratio_override', None),
-                'eq':                dict(p.eq) if hasattr(p, 'eq') and p.eq else {},
+                'eq':                (_qjifield.eq_without_scene(dict(p.eq))
+                                      if (_qjifield is not None and hasattr(p, 'eq') and p.eq)
+                                      else (dict(p.eq) if hasattr(p, 'eq') and p.eq else {})),
                 'base_preset':       getattr(p, 'preset_name', None)
                                      or getattr(p, 'base_preset', None),
             }
@@ -11581,7 +11903,10 @@ def _redisplay_current_cover() -> bool:
 
     表示できたら True、ジャケットが見つからない等で表示できなければ False。
     """
+    global current_image_path
+
     try:
+        # 再生中トラックのパスを特定（current_playing_track優先、無ければ表示情報から）
         track_path = None
         if current_playing_track and current_playing_track.get('path'):
             track_path = current_playing_track.get('path')
@@ -11598,6 +11923,7 @@ def _redisplay_current_cover() -> bool:
         with info_display_lock:
             _ti_copy = current_track_info.copy()
 
+        # 既存のfehウィンドウがあれば畳んでから出し直す（多重表示を防ぐ）
         _feh = current_processes.get('feh')
         if _feh and _feh.poll() is None:
             try:
@@ -11614,7 +11940,8 @@ def _redisplay_current_cover() -> bool:
         #   曲情報を合成した画像（display_image）のパスに設定される。
         #   ここで元画像のパス（image_path）に上書きしてしまうと、後で [i] キー
         #   （画像再表示）を押したときに show_cover_image() が「情報無しの
-        #   ジャケットそのまま」を表示してしまうため、上書きしない。
+        #   ジャケットそのまま」を表示してしまう（実際にこの不具合があった）。
+        #   なのでここでは何も代入せず、関数側の設定をそのまま使う。
         return bool(current_processes['feh'])
     except Exception as e:
         try:
@@ -11934,9 +12261,9 @@ def keyboard_listener():
         old_settings = None
     try:
         tty.setraw(sys.stdin.fileno())
-        # ★ setraw() also disables output post-processing (OPOST), so a plain print("\n") moves down
-        #   without a carriage return and text drifts into a staircase. Re-enable output processing
-        #   only (key input stays raw).
+        # ★ setraw() は出力後処理(OPOST)も切るため、print の "\n" が復帰(CR)を伴わない改行になり、
+        #   外部モジュール等の素の print が階段状にずれて表示される。出力側だけ通常に戻す
+        #   (キー入力は raw のまま)。
         try:
             _oa = termios.tcgetattr(sys.stdin)
             _oa[1] |= (termios.OPOST | termios.ONLCR)
@@ -12089,6 +12416,62 @@ def keyboard_listener():
                     terminal_print(f"\n🎚️  入力ゲインプリセット: {_gain_labels[current_gain_preset]}  ([g]で切替 / [s]で保存)")
                     replay_requested = True  # 現在曲に即反映
 
+                elif key == 's':
+                    # ★★★ [s] 現在の全音響設定をプロファイルとして保存 ★★★
+                    _do_save_profile()
+                    # 保存のみ。再生は続行（replay不要）
+                    # 画面クリア後にコントロール表示を再描画
+                    try:
+                        time.sleep(0.1)
+                        terminal_print(f"\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [ と ] 音量 | [v]音量調整ON/OFF | [0]バイパス/[1-8]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
+                        _gp_l = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
+                        terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_l.get(current_gain_preset, current_gain_preset)}) | [c]フィルター | [s]保存", end="")
+                        if SI_AVAILABLE:
+                            terminal_print(" | [z]フィードバック | [x]プリセット | [a]アルバム登録 | [h]ホール | [p]プロファイル | [e]音場プリセット")
+                        else:
+                            terminal_print()
+                    except:
+                        pass
+                    # ── 画面クリア後にキーガイドを再表示 ──
+                    time.sleep(0.1)
+                    terminal_print(f"\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [ と ] 音量 | [v]音量調整ON/OFF | [0]バイパス/[1-8]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
+                    _fp = FILTER_PRESET_LABELS.get(current_filter_preset, current_filter_preset)
+                    _gp_l2 = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
+                    terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_l2.get(current_gain_preset, current_gain_preset)}) | [c]フィルター ({_fp}) | [s]保存", end="")
+                    if SI_AVAILABLE:
+                        terminal_print(" | [z]フィードバック | [x]プリセット | [a]アルバム登録 | [h]ホール | [p]プロファイル | [e]音場プリセット")
+                    else:
+                        terminal_print()
+
+                elif key in ('0', '1', '2', '3', '4', '5', '6', '7', '8'):
+                    # ★★★ [0]=DSPバイパス(素通し)ON/OFF、[1]〜[8] DSP音場をその場で直接切り替え(言葉+AI判断を介さない直接指定版) ★★★
+                    if dsp_mode_active:
+                        if (toggle_dsp_bypass() if key == '0' else switch_dsp_venue(key)):
+                            # ★ 音声(ffmpeg→aplay)は止めずに、ジャケット画面のバッジだけ
+                            #   新しい音場に合わせて再描画する(曲の頭出しは発生しない)。
+                            try:
+                                _venue_track_path = current_playing_track.get('path') if current_playing_track else None
+                                if _venue_track_path:
+                                    _venue_image_path = find_cover_image_safe(_venue_track_path)
+                                    if _venue_image_path:
+                                        with info_display_lock:
+                                            _venue_track_info_copy = current_track_info.copy()
+                                        if current_processes.get('feh') and current_processes['feh'].poll() is None:
+                                            try:
+                                                current_processes['feh'].terminate()
+                                                current_processes['feh'].wait(timeout=1)
+                                            except Exception:
+                                                pass
+                                        current_processes['feh'] = show_cover_image_with_info(_venue_image_path, _venue_track_info_copy)
+                                        # ★ current_image_path は show_cover_image_with_info() が
+                                        #   曲情報合成後の画像パスに設定済み。ここで元画像パスに
+                                        #   上書きすると、[i]キー再表示時に情報無しの画像に
+                                        #   なってしまうため上書きしない。
+                            except Exception as _e:
+                                terminal_print(f"⚠️ ジャケットバッジの更新に失敗しました: {_e}")
+                    else:
+                        terminal_print("\n⚠️ DSPモードで起動していないため音場切替はできません(起動時にLoopbackを選択してください)")
+
                 elif key == 'u':
                     # ★★★ [u] USB出力デジタルノイズ対策を両方まとめてON/OFF切り替え(A/B比較用) ★★★
                     _new_state = toggle_usb_audio_output()
@@ -12120,42 +12503,34 @@ def keyboard_listener():
                     # ★★★ [m] (alias: y) USBノイズ対策の現在の状態を表示（切替はしない） ★★★
                     terminal_print(f"\n🔌 USBノイズ対策の現状: {_usb_guard_summary()}  (AS=オートサスペンド対策 / RT=リアルタイム優先度)")
 
-                elif key in ('0', '1', '2', '3', '4', '5', '6'):
-                    # ★★★ [1]〜[6] DSPモードをその場で直接切り替え ★★★
-                    if dsp_mode_active:
-                        if (toggle_dsp_bypass() if key == '0' else switch_dsp_venue(key)):
-                            # ★ 音声(ffmpeg→aplay)は止めずに、ジャケット画面のバッジだけ
-                            #   新しいDSPモードに合わせて再描画する(曲の頭出しは発生しない)。
-                            _redisplay_current_cover()
-                    else:
-                        terminal_print("\n⚠️ DSPモードで起動していないため音場切替はできません(起動時にLoopbackを選択してください)")
-
-                elif key == 's':
-                    # ★★★ [s] 現在の全音響設定をプロファイルとして保存 ★★★
-                    _do_save_profile()
-                    # 保存のみ。再生は続行（replay不要）
-                    # 画面クリア後にコントロール表示を再描画
+                elif key == 'e':
+                    # ★★★ [e]→[楽器/声楽/揺らぎ/音量連動/記憶(m)/現在の設定(?)] 音場プリセット ★★★
+                    #   wobble_v7/v8 を再起動せずに調整(v7/v8専用)。楽器のEQは次の曲/[r]再読込から反映。
                     try:
-                        time.sleep(0.1)
-                        terminal_print(f"\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [ と ] 音量 | [v]音量調整ON/OFF | [0]バイパス/[1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
-                        _gp_l = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
-                        terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_l.get(current_gain_preset, current_gain_preset)}) | [c]フィルター | [s]保存", end="")
-                        if SI_AVAILABLE:
-                            terminal_print(" | [z]フィードバック | [x]プリセット | [a]アルバム登録 | [h]ホール | [p]プロファイル")
+                        if _qjifield is None:
+                            terminal_print("\n⚠️ 音場プリセット用の qji_field_ctl.py が見つかりません(~/qji/camilladsp_test/ に置くか、QjiDSPインストーラーで導入してください)")
                         else:
-                            terminal_print()
-                    except:
-                        pass
-                    # ── 画面クリア後にキーガイドを再表示 ──
-                    time.sleep(0.1)
-                    terminal_print(f"\n🎹 [r]最初から再生 | [f]フォルダー順次再生 | [n]次 | [b]前 | [i]画像再表示 | [o]お気に入り登録 | [ と ] 音量 | [v]音量調整ON/OFF | [0]バイパス/[1-6]音場切替(DSP時) | [u/k/j/m]USBノイズ対策(全体/AS/RT/状態): {_usb_guard_summary()} | [q]終了してメニューへ")
-                    _fp = FILTER_PRESET_LABELS.get(current_filter_preset, current_filter_preset)
-                    _gp_l2 = {'classical': 'クラシック(0dB)', 'general': '汎用(-1.5dB)', 'jazz_pop': 'ポップス(-3.5dB)', 'loud': 'ラウド(-5dB)'}
-                    terminal_print(f"🔊 [+][-]出力ゲイン ({CURRENT_VOLUME:+d} dB) | [g]入力ゲイン ({_gp_l2.get(current_gain_preset, current_gain_preset)}) | [c]フィルター ({_fp}) | [s]保存", end="")
-                    if SI_AVAILABLE:
-                        terminal_print(" | [z]フィードバック | [x]プリセット | [a]アルバム登録 | [h]ホール | [p]プロファイル")
-                    else:
-                        terminal_print()
+                            if not dsp_mode_active:
+                                terminal_print("\n⚠️ DSPモードではないため、揺らぎ側は効きません(楽器EQのみ)")
+                            elif current_dsp_venue not in ('7', '8'):
+                                terminal_print("\nℹ️ 現在はv7/v8ではないため、揺らぎ側は反映されません([7]か[8]へ)")
+                            _qjifield.handle_two_stage_key(_si_instance if SI_AVAILABLE else None, say=terminal_print)
+                            # ★ 記憶できたら、[s]保存と同様にジャケット表示へ戻る(音声は止めない) ★
+                            if _qjifield.consume_saved():
+                                with terminal_io_lock:
+                                    print("\n  🖼️  ジャケット表示に戻ります...")
+                                    sys.stdout.flush()
+                                time.sleep(0.4)
+                                if not _redisplay_current_cover():
+                                    with terminal_io_lock:
+                                        print("  ℹ️  ジャケット画像が見つかりませんでした（再生は継続中です）")
+                                        sys.stdout.flush()
+                            try:
+                                termios.tcflush(sys.stdin, termios.TCIFLUSH)
+                            except Exception:
+                                pass
+                    except Exception as _e:
+                        terminal_print(f"\n⚠️ 音場プリセットエラー: {_e}")
     except Exception as e:
         terminal_print(f"キーボードリスナーエラー: {e}")
     finally:
@@ -12411,15 +12786,26 @@ def play_tracks_gapless(tracks, start_index=0):
             if os.path.exists(first_track_path):
                 original_sample_rate = get_sample_rate(first_track_path)
 
+        # ★★★ フォーマット不一致の事前チェック（診断用の警告のみ、再生は止めない） ★★★
+        _check_gapless_batch_format_mismatch(batch_tracks, original_sample_rate)
+
         # Concatファイルを作成
         concat_file = create_concat_file_for_gapless(batch_tracks, temp_dir)
+
+        # ★★★ 音場プリセット: ギャップレスは1本のフィルターで通すため、先頭曲の設定をバッチ全体に適用 ★★★
+        try:
+            if _qjifield is not None and batch_tracks:
+                _qjifield.on_track_start(batch_tracks[0], _si_instance if SI_AVAILABLE else None, say=terminal_print,
+                                              context={'dsp': dsp_mode_active, 'venue': current_dsp_venue, 'filter_preset': current_filter_preset})
+        except Exception:
+            pass
 
         # ★★★ アップサンプリング設定に応じて出力サンプリングレートを決定 ★★★
         if upsampling_target_rate > 0:
             output_sample_rate = upsampling_target_rate
             pass  # サンプリングレート情報（情報バーに表示済み）
         else:
-            output_sample_rate = 48000 if dsp_mode_active else original_sample_rate  # ★ 生PCMはヘッダーがないため、DSPモードでは aplay の -r 48000 と一致させる
+            output_sample_rate = 48000 if dsp_mode_active else original_sample_rate
             pass  # サンプリングレート情報
         
         # FFmpegコマンドを構築
@@ -12431,7 +12817,8 @@ def play_tracks_gapless(tracks, start_index=0):
 
         # ★★★ Sonia Intelligence: SI EQデルタをeq_partに追加 ★★★
         if SI_AVAILABLE and _si_instance and _si_instance.current_params:
-            _si_eq_str = _si_get_eq_filters(_si_instance.current_params)
+            _si_eq_str = _si_get_eq_filters(_qjifield.params_with_scene(_si_instance.current_params)
+                                           if _qjifield is not None else _si_instance.current_params)
             if _si_eq_str:
                 eq_part = eq_part + _si_eq_str + ','
         
@@ -12524,10 +12911,20 @@ def play_tracks_gapless(tracks, start_index=0):
         print("=" * 60)
         
         # FFmpegとaplayをパイプで接続
+        # ★ ffmpegのstderrはDEVNULLに捨てず、ログファイルに残す
+        #   （concatデマルチプレクサがフォーマット不一致等で異常終了した際、
+        #    実際のエラー内容を後から確認できるようにするため）
+        _gapless_ffmpeg_log_path = f'/tmp/qji_gapless_ffmpeg_{os.getpid()}.log'
+        try:
+            _gapless_ffmpeg_log = open(_gapless_ffmpeg_log_path, 'w', encoding='utf-8', errors='replace')
+        except Exception:
+            _gapless_ffmpeg_log = subprocess.DEVNULL
+            _gapless_ffmpeg_log_path = None
+
         ffmpeg_proc = subprocess.Popen(
             ffmpeg_cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL
+            stderr=_gapless_ffmpeg_log
         )
         
         _gain_relay_stop = threading.Event()
@@ -12588,6 +12985,11 @@ def play_tracks_gapless(tracks, start_index=0):
                 _gain_relay_stop.set()
                 ffmpeg_proc.terminate()
                 aplay_proc.terminate()
+                try:
+                    if _gapless_ffmpeg_log is not subprocess.DEVNULL:
+                        _gapless_ffmpeg_log.close()
+                except Exception:
+                    pass
                 return gapless_current_index
             
             if next_track_requested:
@@ -12596,6 +12998,11 @@ def play_tracks_gapless(tracks, start_index=0):
                 _gain_relay_stop.set()
                 ffmpeg_proc.terminate()
                 aplay_proc.terminate()
+                try:
+                    if _gapless_ffmpeg_log is not subprocess.DEVNULL:
+                        _gapless_ffmpeg_log.close()
+                except Exception:
+                    pass
                 return min(gapless_current_index + 1, len(tracks) - 1)
             
             if prev_track_requested:
@@ -12604,12 +13011,43 @@ def play_tracks_gapless(tracks, start_index=0):
                 _gain_relay_stop.set()
                 ffmpeg_proc.terminate()
                 aplay_proc.terminate()
+                try:
+                    if _gapless_ffmpeg_log is not subprocess.DEVNULL:
+                        _gapless_ffmpeg_log.close()
+                except Exception:
+                    pass
                 return max(0, gapless_current_index - 1)
         
         # プロセスの終了待ち
         ffmpeg_proc.wait()
         aplay_proc.wait()
-        
+
+        try:
+            if _gapless_ffmpeg_log is not subprocess.DEVNULL:
+                _gapless_ffmpeg_log.close()
+        except Exception:
+            pass
+
+        # ★ ffmpegが異常終了していた場合、それまで「全曲再生完了」と
+        #   同じ扱いになっていた（returncodeを見ていなかったため）。
+        #   ここで区別し、クラッシュ時はその旨とログの場所を表示する。
+        if ffmpeg_proc.returncode not in (0, None, -15, -9):
+            print(f"\n⚠️  ギャップレス再生が途中で異常終了しました "
+                  f"(曲 {gapless_current_index + 1}/{len(tracks)} 付近, "
+                  f"ffmpeg終了コード: {ffmpeg_proc.returncode})")
+            if _gapless_ffmpeg_log_path and os.path.exists(_gapless_ffmpeg_log_path):
+                try:
+                    with open(_gapless_ffmpeg_log_path, 'r', encoding='utf-8', errors='replace') as f:
+                        _tail = f.readlines()[-15:]
+                    if _tail:
+                        print("   --- ffmpegの直近ログ ---")
+                        for line in _tail:
+                            print(f"   {line.rstrip()}")
+                        print(f"   （全文: {_gapless_ffmpeg_log_path}）")
+                except Exception:
+                    pass
+            return gapless_current_index
+
         # 全曲再生完了
         return len(tracks)
     
@@ -12617,6 +13055,11 @@ def play_tracks_gapless(tracks, start_index=0):
         print(f"⚠️ ギャップレス再生エラー: {e}")
         import traceback
         traceback.print_exc()
+        try:
+            if '_gapless_ffmpeg_log' in locals() and _gapless_ffmpeg_log is not subprocess.DEVNULL:
+                _gapless_ffmpeg_log.close()
+        except Exception:
+            pass
         return start_index
     
     finally:
@@ -13137,8 +13580,8 @@ def show_splash_screen():
 
 
 def dsp_venue_menu():
-    """★ ホーム画面から DSP音場(v1〜v6)を切り替えるメニュー。
-    再生中の[1]〜[6]キーと同じ switch_dsp_venue() を使うため、
+    """★ ホーム画面から DSP音場(V1〜V8)を切り替えるメニュー。
+    再生中の[1]〜[8]キーと同じ switch_dsp_venue() を使うため、
     DACの選び直しは行わず「音場だけ」が変わる。
     ラジオ/Qobuz等のストリーミング再生は、ここで選んだ音場がそのまま適用される。"""
     global current_dsp_venue
@@ -13148,15 +13591,15 @@ def dsp_venue_menu():
     while True:
         print("\n🎛️ DSP音場の切り替え")
         print("=" * 60)
-        for _k in ('1', '2', '3', '4', '5', '6'):
+        for _k in ('1', '2', '3', '4', '5', '6', '7', '8'):
             _mark = "  ◀ 現在" if current_dsp_venue == _k else ""
-            print(f"  {_k}. {DSP_VENUE_LABELS.get(_k, 'v' + _k)}{_mark}")
+            print(f"  {_k}. {DSP_VENUE_LABELS.get(_k, 'V' + _k)}{_mark}")
         print("  0. 戻る")
         print("=" * 60)
-        _sel = input("\n音場を選択 (1-6, 0=戻る): ").strip()
+        _sel = input("\n音場を選択 (1-8, 0=戻る): ").strip()
         if _sel in ('', '0', 'q'):
             return
-        if _sel not in ('1', '2', '3', '4', '5', '6'):
+        if _sel not in ('1', '2', '3', '4', '5', '6', '7', '8'):
             print("⚠️ 無効な選択です")
             continue
         if _sel == current_dsp_venue:
@@ -13238,7 +13681,7 @@ def interactive_mode():
         print("  AP. 📡 AirPlay レシーバー（iPhone / Mac から受信）")  # ★★★ AirPlay ★★★
         print("  DL. 📻 UPnP/DLNA レシーバー（BubbleUPnP 等から受信）")  # ★★★ UPnP/DLNA ★★★
         if dsp_mode_active:
-            print(f"  D. 🎛️ DSP音場の切り替え (v1〜v6): 現在 {DSP_VENUE_LABELS.get(current_dsp_venue, '-')}")
+            print(f"  D. 🎛️ DSP音場の切り替え (V1〜V8): 現在 {DSP_VENUE_LABELS.get(current_dsp_venue, '-')}")
         print("  X. 🔄 DSP出力デバイスの再認識（後から接続したDACを掴み直す）")  # ★★★ 追加 ★★★
         print("  Q. 終了")
         print("=" * 60)
@@ -14026,7 +14469,7 @@ def interactive_mode():
                     output_device=output_device,
                 )
 
-            elif choice == 'd':  # ★★★ DSP音場(v1〜v6)切替 ★★★
+            elif choice == 'd':  # ★★★ DSP音場(V1〜V8)切替 ★★★
                 dsp_venue_menu()
                 continue
 
@@ -14137,6 +14580,8 @@ if __name__ == "__main__":
                 '4': f'{_HOME}/qjidsp_backup_v4/spatial_final.yml',
                 '5': f'{_HOME}/qjidsp_backup_v5/spatial_final.yml',
                 '6': f'{_HOME}/qjidsp_backup_v6/spatial_final.yml',
+                '7': f'{_HOME}/qjidsp_backup_v7/spatial_final.yml',
+                '8': f'{_HOME}/qjidsp_backup_v8/spatial_final.yml',
             }
             _wobble_map = {
                 '1': f'{_HOME}/camilladsp_test/wobble_v1.py',
@@ -14145,10 +14590,12 @@ if __name__ == "__main__":
                 '4': f'{_HOME}/camilladsp_test/wobble_v4.py',
                 '5': f'{_HOME}/camilladsp_test/wobble_v5.py',
                 '6': f'{_HOME}/camilladsp_test/wobble_v5_harmonics_hp.py',
+                '7': f'{_HOME}/camilladsp_test/wobble_v7.py',
+                '8': f'{_HOME}/camilladsp_test/wobble_v8.py',
             }
             # ★ Loopback選択時はDSPモードの使用が前提のため、「DSPなしで起動」は
             #   選択肢として提示しない（音が出ない矛盾した状態を防ぐ）。
-            #   1〜6のいずれかを選ぶまでループする。
+            #   1〜8のいずれかを選ぶまでループする。
             _dsp_choice = ''
             while _dsp_choice not in _yml_map:
                 print("\n" + "=" * 60)
@@ -14160,10 +14607,24 @@ if __name__ == "__main__":
                 print("  4) v4 素材の味（動）    — シンプル・和食系パンニング")
                 print("  5) v5 倍音モード        — ヴァイオリン共鳴・尺八系倍音強調")
                 print("  6) v6 倍音モード（ヘッドホン用） — 密閉型/開放型ヘッドホン向けに最適化")
+                print("  7) v7 倍音ホールモード  — v5を基調としたホール。籠もらず聴きやすい")
+                print("  8) v8 実態感ホール      — v5を基調としたホール。響きが濃く、実体感が強い")
                 print("=" * 60)
-                _dsp_choice = input("DSPモード選択 (1/2/3/4/5/6) → ").strip()
+                # ★ 導入されていない音場(YAMLやwobbleが無い)は、選ばれても落とさず案内して選び直させる
+                _unavail = {_k: [_p for _p in (_yml_map[_k], _wobble_map[_k]) if not os.path.exists(_p)]
+                            for _k in _yml_map}
+                if any(_unavail.values()):
+                    print("  ※ 次の音場は必要なファイルが見つからないため選べません: "
+                          + ", ".join(f"v{_k}" for _k, _m in _unavail.items() if _m))
+                _dsp_choice = input("DSPモード選択 (1/2/3/4/5/6/7/8) → ").strip()
                 if _dsp_choice not in _yml_map:
-                    print("⚠️ 1〜6のいずれかを選択してください（Loopback選択時はDSP起動が必須です）")
+                    print("⚠️ 1〜8のいずれかを選択してください（Loopback選択時はDSP起動が必須です）")
+                elif _unavail.get(_dsp_choice):
+                    print(f"\n❌ v{_dsp_choice} に必要なファイルが見つかりません:")
+                    for _p in _unavail[_dsp_choice]:
+                        print(f"   - {_p}")
+                    print("   QjiDSPインストーラー(最新版)で導入するか、別の音場を選んでください。")
+                    _dsp_choice = ''
             if True:
                 # ★ {HOME}プレースホルダを実際のホームパスへ展開してからコピーする
                 #   （単純な shutil.copy だと {HOME} が文字列のまま残り、
@@ -14200,7 +14661,12 @@ if __name__ == "__main__":
                 _time.sleep(1.0)
                 print(f"🎛️  DSP v{_dsp_choice} 起動完了")
                 dsp_mode_active = True
-                current_dsp_venue = _dsp_choice  # ★ ジャケットバッジ・[1-6]切替の初期値として記録
+                current_dsp_venue = _dsp_choice  # ★ [1]〜[8]キーでの以後の切替判定用に記録
+                try:
+                    if _qjifield is not None:
+                        _qjifield.set_venue(_dsp_choice)
+                except Exception:
+                    pass
                 # ★ CamillaDSP/wobbleはここで一度だけ起動する常駐プロセス。
                 #   プログラム終了時にのみ確実に停止させる（途中のcleanup_processes()では止めない）
                 atexit.register(shutdown_dsp)
